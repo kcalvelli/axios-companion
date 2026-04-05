@@ -35,9 +35,11 @@
         axios-companion = self.packages.${final.system}.default;
       };
 
-      # Home-Manager Module — will be populated by Phase 4 of the bootstrap change.
-      # See openspec/changes/bootstrap/specs/home-manager/spec.md.
-      homeManagerModules.default = _: { };
+      # Home-Manager Module — exposes `services.axios-companion.*`. Imports
+      # as a closure over `self` so the module can reach
+      # `self.lib.${pkgs.system}.buildCompanion` when building the per-user
+      # wrapper. See openspec/changes/bootstrap/specs/home-manager/spec.md.
+      homeManagerModules.default = import ./modules/home-manager { inherit self; };
 
       # Packages.
       #

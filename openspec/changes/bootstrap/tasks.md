@@ -44,22 +44,22 @@
 
 ## Phase 4: Home-manager module
 
-- [ ] **4.1** Create `modules/home-manager/default.nix` with the option schema from `specs/home-manager/spec.md`:
-  - [ ] `enable` — boolean
-  - [ ] `package` — package (default: self)
-  - [ ] `claudePackage` — package (default: `pkgs.claude-code`)
-  - [ ] `persona.basePackage` — package (default: this flake's persona-default)
-  - [ ] `persona.userFile` — nullable path
-  - [ ] `persona.extraFiles` — list of paths
-  - [ ] `workspaceDir` — string (default: `"${config.xdg.dataHome}/axios-companion/workspace"`)
-  - [ ] `mcpConfigFile` — nullable path
-- [ ] **4.2** Implement the `config` block:
-  - [ ] Guard everything behind `lib.mkIf cfg.enable`
-  - [ ] Build the wrapper by calling `inputs.axios-companion.lib.${pkgs.system}.buildCompanion` (the flake-exposed helper from Phase 2 task 2.3) with `claudePackage`, `personaBasePackage`, `userFile`, `extraFiles`, `defaultWorkspace`, and `mcpConfigFile` taken from `cfg`
-  - [ ] Do NOT consume `inputs.axios-companion.packages.${pkgs.system}.default` directly — that is the reference build, not the per-user build path
-  - [ ] Add the resulting package to `home.packages`
-- [ ] **4.3** Wire `homeManagerModules.default` in `flake.nix` to point at `./modules/home-manager`
-- [ ] **4.4** Verify module evaluates cleanly with `nix eval` or a test home-manager config
+- [x] **4.1** Create `modules/home-manager/default.nix` with the option schema from `specs/home-manager/spec.md`:
+  - [x] `enable` — boolean
+  - [x] `package` — package (default: self)
+  - [x] `claudePackage` — package (default: `pkgs.claude-code`)
+  - [x] `persona.basePackage` — package (default: this flake's persona-default)
+  - [x] `persona.userFile` — nullable path
+  - [x] `persona.extraFiles` — list of paths
+  - [x] `workspaceDir` — string (default: `"${config.xdg.dataHome}/axios-companion/workspace"`)
+  - [x] `mcpConfigFile` — nullable path
+- [x] **4.2** Implement the `config` block:
+  - [x] Guard everything behind `lib.mkIf cfg.enable`
+  - [x] Build the wrapper by calling `inputs.axios-companion.lib.${pkgs.system}.buildCompanion` (the flake-exposed helper from Phase 2 task 2.3) with `claudePackage`, `personaBasePackage`, `userFile`, `extraFiles`, `defaultWorkspace`, and `mcpConfigFile` taken from `cfg`
+  - [x] Do NOT consume `inputs.axios-companion.packages.${pkgs.system}.default` directly — that is the reference build, not the per-user build path
+  - [x] Add the resulting package to `home.packages`
+- [x] **4.3** Wire `homeManagerModules.default` in `flake.nix` to point at `./modules/home-manager`
+- [x] **4.4** Verify module evaluates cleanly with `nix eval` or a test home-manager config
 
 ## Phase 5: Manual end-to-end testing
 
