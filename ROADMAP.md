@@ -1,0 +1,76 @@
+# Roadmap
+
+axios-companion is built in tiers. Each tier is a complete, shippable feature set that users can stop at if it meets their needs. Each OpenSpec change in `openspec/changes/` corresponds to one discrete piece of work that can be picked up independently, respecting the dependency ordering below.
+
+This document is the master index. See individual `proposal.md` files for details.
+
+## Tiering philosophy
+
+- **Tier 0** is the minimum viable product — a persona'd shell wrapper around Claude Code. Every axios user gets this on day one.
+- **Tier 1** adds a persistent user-level daemon that unlocks channel adapters (Telegram/Discord/email/XMPP), a proper CLI, and a TUI dashboard. Users who want a "Sid is always there" experience on one machine stop here.
+- **Tier 2** adds distributed agency — one companion identity that can act on whichever machine the user is currently using, via mcp-gateway over Tailscale. Users with multiple NixOS machines unlock this.
+- **Optional** polish layers come after Tier 2 — GUI clients, desktop shell integrations, advanced tooling. Never required.
+
+## The build order
+
+Work proceeds roughly top-to-bottom. Items at the same level can be built in parallel once their dependencies are satisfied.
+
+### Tier 0 — Foundation
+
+- [ ] **[bootstrap](./openspec/changes/bootstrap/)** — Shell wrapper, home-manager module, minimal default persona files. Ships a working `companion` command for every axios user. *No dependencies.*
+
+### Tier 1 — Daemon and local surfaces
+
+- [ ] **[daemon-core](./openspec/changes/daemon-core/)** — User-level systemd daemon, D-Bus interface, session store. The foundation for every Tier 1+ feature. *Depends on: bootstrap*
+- [ ] **[cli-client](./openspec/changes/cli-client/)** — Rust CLI with subcommands, replacing the Tier 0 shell wrapper (while keeping backward compatibility). *Depends on: bootstrap, daemon-core*
+- [ ] **[tui-dashboard](./openspec/changes/tui-dashboard/)** — Terminal-native dashboard built on ratatui. *Depends on: bootstrap, daemon-core*
+- [ ] **[channel-telegram](./openspec/changes/channel-telegram/)** — First channel adapter; establishes the pattern for subsequent adapters. *Depends on: bootstrap, daemon-core*
+- [ ] **[channel-email](./openspec/changes/channel-email/)** — IMAP IDLE + SMTP adapter with thread preservation. *Depends on: bootstrap, daemon-core, channel-telegram (pattern reference)*
+- [ ] **[channel-discord](./openspec/changes/channel-discord/)** — Discord bot adapter. *Depends on: bootstrap, daemon-core, channel-telegram (pattern reference)*
+- [ ] **[channel-xmpp](./openspec/changes/channel-xmpp/)** — XMPP adapter for self-hosted servers. *Depends on: bootstrap, daemon-core, channel-telegram (pattern reference)*
+
+Tier 1 channel adapters after the first can be built in any order. The pattern is identical.
+
+### Tier 2 — Distributed agency
+
+- [ ] **[spoke-tools](./openspec/changes/spoke-tools/)** — MCP tool servers exposing local machine capabilities (shell, apps, screenshot, clipboard, notify, journal, niri) via mcp-gateway. *Depends on: bootstrap. Standalone-useful even without distributed-routing.*
+- [ ] **[distributed-routing](./openspec/changes/distributed-routing/)** — Hub daemon learns to route tool calls to multiple spokes over Tailscale with active-spoke presence tracking. *Depends on: bootstrap, daemon-core, spoke-tools, cli-client*
+
+### Optional polish
+
+- [ ] **[gui-gtk4](./openspec/changes/gui-gtk4/)** — GTK4/libadwaita desktop application for visual dashboards. Explicitly last and optional. *Depends on: bootstrap, daemon-core, cli-client, tui-dashboard*
+
+### Consumer-side (lives in axios repo, not this one)
+
+- [ ] **[axios-integration](./openspec/changes/axios-integration/)** — Thin axios-side wiring that imports this flake and exposes axios-friendly defaults. *Depends on: bootstrap (at minimum). The actual change artifact will live in axios/openspec/changes/, not here.*
+
+## How to pick the next proposal
+
+When you're ready to implement something:
+
+1. Check `ROADMAP.md` (this file) for the current status of each proposal
+2. Pick any proposal whose dependencies are all marked complete
+3. Open that proposal's directory (`openspec/changes/<name>/`)
+4. Read `proposal.md` to understand the motivation, scope, and success criteria
+5. If the proposal is still a skeleton, flesh out `specs/` and `tasks.md` before writing any code
+6. Implement against `tasks.md`, checking items off as they complete
+7. Once all tasks are done and success criteria are met, archive the change to `openspec/changes/archive/<name>/` and update this ROADMAP
+
+## Key non-negotiables (enforced in `openspec/config.yaml`)
+
+Every proposal must honor these rules:
+
+- **Wrapper around claude-code only.** If Claude Code already does it, we don't reimplement it.
+- **No separate auth layer.** User's existing claude-code credentials + Tailscale network trust are the only auth mechanisms.
+- **Per-user home-manager only.** No system-level NixOS modules for companion runtime.
+- **Character-free default persona.** Personality is opt-in via user-supplied files.
+- **Tier discipline.** Proposals declare their tier and don't depend on tiers above themselves.
+
+## Estimated total scope
+
+- **Tier 0 alone**: ~200 lines of Nix + shell + two markdown files. Shippable in a single sitting.
+- **Tier 1 complete**: ~3,000 LoC Rust + ~300 lines of Nix. Multiple proposals, weeks of work if pursued sequentially.
+- **Tier 2 complete**: +1,500 LoC Rust (mostly tool servers and hub routing) + ~200 lines of Nix.
+- **Optional GUI**: +1,500 LoC Rust for a solid libadwaita app.
+
+Total under 6,000 LoC Rust and ~800 LoC Nix for the entire project — an order of magnitude smaller than comparable agent frameworks, because we delegate everything Claude Code already does.

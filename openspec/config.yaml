@@ -1,0 +1,64 @@
+schema: spec-driven
+
+context: |
+  axios-companion - A persistent, customizable persona wrapper around Claude Code.
+
+  Turns a user's existing Claude subscription into an AI agent that lives with them
+  across their Linux machines — with a consistent persona, a home on the filesystem,
+  and (at higher tiers) the ability to act on whichever machine the user is currently
+  using.
+
+  Tech stack: Nix (home-manager module), shell (Tier 0 wrapper), Rust (Tier 1+ daemon
+  and clients), MCP (Tier 2 tool surfaces via mcp-gateway).
+
+  Scope:
+  - Tier 0: A `companion` shell wrapper that invokes `claude -p` with persona files,
+    workspace directory, and MCP config pre-loaded
+  - Tier 1: A user-level systemd daemon adding persistent sessions, channel adapters
+    (Telegram/Discord/email/XMPP), a CLI with subcommands, and a TUI dashboard
+  - Tier 2: Hub-and-spoke distributed agency via mcp-gateway over Tailscale, allowing
+    the agent to act on the machine the user is currently using
+  - Optional: GTK4/libadwaita GUI client
+  - Home-manager module shipped as a flake output for any NixOS user to consume
+
+  Non-goals:
+  - Replacing or reimplementing any Claude Code functionality (the agent loop,
+    tool execution, permission prompts, streaming, auth — all belong to Claude Code)
+  - Multi-tenant service architecture (each user runs their own isolated instance)
+  - Application-level authentication (Tailscale provides network-level trust)
+  - Cloud hosting, SaaS offerings, or any server the user doesn't control
+  - Character personality in the default shipped persona (users bring their own voice)
+  - A replacement for Claude Code as a primary interface (this is for users who want
+    Claude Code to feel like a persistent agent, not a different chat UI)
+  - Supporting AI providers other than Claude via Claude Code
+
+  Related projects:
+  - axios - NixOS-based distribution; canonical consumer of this module
+  - mcp-gateway - MCP server aggregator used as the spoke daemon in Tier 2
+  - Claude Code - The agent runtime this project wraps
+
+rules:
+  proposal:
+    - Wrapper-Only - if Claude Code already provides a capability, this project does
+      not reimplement it; the only acceptable exception is adapting output formats
+      (e.g., parsing stream-json for daemon state tracking)
+    - No Separate Auth - every proposal that touches authentication MUST delegate to
+      the user's existing claude-code credentials (~/.claude/) and/or Tailscale network
+      trust; any proposal introducing a new auth layer, account system, or token
+      exchange is out of scope and must be rejected
+    - Per-User Only - all runtime components run as home-manager user services;
+      proposals introducing system-level NixOS modules for companion runtime are
+      rejected (consumer-side integrations like the axios-integration proposal may
+      add system-level options, but the companion itself stays user-level)
+    - Tailscale-First Networking - Tier 2 and later proposals that require network
+      communication between machines MUST use Tailscale as the trust boundary and
+      MUST NOT add application-level auth on top
+    - Tier Discipline - proposals must declare which tier they belong to (0, 1, 2,
+      or optional) and must not depend on tiers above their own
+    - Character-Free Defaults - the default persona files shipped with this repo
+      must not include any character voice, personality quirks, or nostalgia framing;
+      users bring their own voice via override options
+    - Include Non-Goals - every proposal must include a "Non-Goals" or "Out of Scope"
+      section listing what it explicitly does not address
+    - Dependency Declaration - every proposal must list which previous changes it
+      depends on being shipped (or explicitly state "no dependencies")

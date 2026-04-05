@@ -1,0 +1,8 @@
+result
+result-*
+.direnv
+.envrc
+.pre-commit-config.yaml
+*.swp
+*.swo
+.DS_Store
