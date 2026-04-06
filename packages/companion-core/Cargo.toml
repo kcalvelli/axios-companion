@@ -11,3 +11,8 @@ tracing-journald = "0.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rusqlite = { version = "0.35", features = ["bundled"] }
 thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

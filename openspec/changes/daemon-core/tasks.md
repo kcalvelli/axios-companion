@@ -20,15 +20,15 @@
 
 ## Phase 3: Dispatcher core
 
-- [ ] **3.1** Define the `Surface` trait with `surface_id()` method, and `TurnRequest` / `TurnEvent` / `TurnResponse` types per `specs/dispatcher/spec.md`
-- [ ] **3.2** Implement the dispatcher: accept `TurnRequest`, resolve session via store (create if new), build the `companion` invocation command
-- [ ] **3.3** Implement subprocess spawning: `tokio::process::Command` for `companion -p "..." --output-format stream-json --verbose [--resume <id>]`
-- [ ] **3.4** Implement stream-json line parser: read stdout line-by-line, deserialize JSON, dispatch by `type` field
-- [ ] **3.5** Implement session-id capture from the `init` event; call `set_claude_session_id` on the store
-- [ ] **3.6** Implement `TurnEvent` emission: `TextChunk` from `assistant` events, `Complete` from `result/success`, `Error` from `result/error` or subprocess failure
-- [ ] **3.7** Implement per-session turn serialization: tokio mutex keyed by `(surface, conversation_id)`, queue concurrent requests to the same session
-- [ ] **3.8** Implement cancellation: drop the `TurnResponse` stream sends SIGTERM to the subprocess
-- [ ] **3.9** Integration test with a mock `companion` script that emits canned stream-json output
+- [x] **3.1** Define the `Surface` trait with `surface_id()` method, and `TurnRequest` / `TurnEvent` / `TurnResponse` types per `specs/dispatcher/spec.md`
+- [x] **3.2** Implement the dispatcher: accept `TurnRequest`, resolve session via store (create if new), build the `companion` invocation command
+- [x] **3.3** Implement subprocess spawning: `tokio::process::Command` for `companion -p "..." --output-format stream-json --verbose [--resume <id>]`
+- [x] **3.4** Implement stream-json line parser: read stdout line-by-line, deserialize JSON, dispatch by `type` field
+- [x] **3.5** Implement session-id capture from the `init` event; call `set_claude_session_id` on the store
+- [x] **3.6** Implement `TurnEvent` emission: `TextChunk` from `assistant` events, `Complete` from `result/success`, `Error` from `result/error` or subprocess failure
+- [x] **3.7** Implement per-session turn serialization: tokio mutex keyed by `(surface, conversation_id)`, queue concurrent requests to the same session
+- [x] **3.8** Implement cancellation: drop the `TurnResponse` stream sends SIGTERM to the subprocess
+- [x] **3.9** Integration test with a mock `companion` script that emits canned stream-json output
 
 ## Phase 4: D-Bus interface
 

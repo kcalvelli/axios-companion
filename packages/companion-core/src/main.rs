@@ -1,3 +1,4 @@
+mod dispatcher;
 mod store;
 
 use tracing::{error, info};
@@ -43,7 +44,7 @@ async fn main() {
         .join("axios-companion")
         .join("sessions.db");
 
-    let _store = match store::SessionStore::open(&db_path) {
+    let store = match store::SessionStore::open(&db_path) {
         Ok(s) => {
             info!(path = %db_path.display(), "session store ready");
             s
@@ -53,6 +54,9 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    let _dispatcher = dispatcher::Dispatcher::new(store);
+    info!("dispatcher ready");
 
     // Placeholder: wait for shutdown signal.
     match tokio::signal::ctrl_c().await {
