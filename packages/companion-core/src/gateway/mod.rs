@@ -120,13 +120,30 @@ async fn chat_completions(
         }
     };
 
+    // Collect system messages and prepend them as context to the user message.
+    // This preserves instructions from callers like sid-assistant (HA) that use
+    // the system role to provide action context or behavioral guidance.
+    let system_context: Vec<&str> = req
+        .messages
+        .iter()
+        .filter(|m| m.role == "system")
+        .filter_map(|m| m.content.as_deref())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let message_text = if system_context.is_empty() {
+        user_message
+    } else {
+        format!("{}\n\n{}", system_context.join("\n\n"), user_message)
+    };
+
     // Resolve conversation ID per session policy.
     let conversation_id = resolve_conversation_id(&state.config, &headers);
 
     let turn_req = TurnRequest {
         surface_id: "openai".into(),
         conversation_id,
-        message_text: user_message,
+        message_text,
     };
 
     let streaming = req.stream.unwrap_or(false);

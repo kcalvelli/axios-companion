@@ -90,7 +90,7 @@ async fn main() {
             )
             .await
             {
-                error!(%e, "OpenAI gateway failed");
+                error!("OpenAI gateway failed: {e}");
             }
         }))
     } else {
