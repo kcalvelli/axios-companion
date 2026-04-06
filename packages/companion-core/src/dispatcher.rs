@@ -95,6 +95,11 @@ impl Dispatcher {
         }
     }
 
+    /// Get a lock on the session store (for D-Bus methods that query sessions directly).
+    pub async fn store(&self) -> tokio::sync::MutexGuard<'_, SessionStore> {
+        self.store.lock().await
+    }
+
     /// Create a dispatcher with a custom companion command and env vars (for tests).
     #[cfg(test)]
     pub fn with_command(

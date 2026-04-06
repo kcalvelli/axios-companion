@@ -1,5 +1,8 @@
+mod dbus;
 mod dispatcher;
 mod store;
+
+use std::sync::Arc;
 
 use tracing::{error, info};
 
@@ -35,11 +38,10 @@ async fn main() {
     );
 
     // Open the session store.
-    let data_dir = std::env::var("XDG_DATA_HOME")
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").expect("HOME not set");
-            format!("{home}/.local/share")
-        });
+    let data_dir = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").expect("HOME not set");
+        format!("{home}/.local/share")
+    });
     let db_path = std::path::PathBuf::from(data_dir)
         .join("axios-companion")
         .join("sessions.db");
@@ -55,10 +57,19 @@ async fn main() {
         }
     };
 
-    let _dispatcher = dispatcher::Dispatcher::new(store);
+    let dispatcher = Arc::new(dispatcher::Dispatcher::new(store));
     info!("dispatcher ready");
 
-    // Placeholder: wait for shutdown signal.
+    // Acquire D-Bus name and serve the interface.
+    let _connection = match dbus::serve(dispatcher).await {
+        Ok(c) => c,
+        Err(e) => {
+            error!(%e, "failed to start D-Bus interface");
+            std::process::exit(1);
+        }
+    };
+
+    // Wait for shutdown signal.
     match tokio::signal::ctrl_c().await {
         Ok(()) => info!("received shutdown signal, exiting"),
         Err(e) => error!(%e, "failed to listen for shutdown signal"),

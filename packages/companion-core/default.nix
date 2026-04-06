@@ -6,6 +6,8 @@
 {
   lib,
   rustPlatform,
+  pkg-config,
+  dbus,
 }:
 rustPlatform.buildRustPackage {
   pname = "companion-core";
@@ -14,6 +16,9 @@ rustPlatform.buildRustPackage {
   src = ./.;
 
   cargoLock.lockFile = ./Cargo.lock;
+
+  nativeBuildInputs = [ pkg-config ];
+  buildInputs = [ dbus ];
 
   meta = {
     description = "axios-companion daemon — persistent session manager and D-Bus control plane";

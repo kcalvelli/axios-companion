@@ -32,15 +32,15 @@
 
 ## Phase 4: D-Bus interface
 
-- [ ] **4.1** Add `zbus` dependency for async D-Bus on tokio
-- [ ] **4.2** Implement the `org.axios.Companion1` interface struct with `zbus::interface` macro
-- [ ] **4.3** Implement `SendMessage` method: create `TurnRequest`, dispatch, accumulate `Complete`, return string (or D-Bus error)
-- [ ] **4.4** Implement `StreamMessage` method: create `TurnRequest`, dispatch, return immediately, emit `ResponseChunk`/`ResponseComplete`/`ResponseError` signals
-- [ ] **4.5** Implement `ListSessions` method: query the session store, return array of tuples
-- [ ] **4.6** Implement `GetStatus` method: return dict with uptime, active sessions, in-flight turns, version
-- [ ] **4.7** Implement `GetActiveSurfaces` method: query the session store for distinct surfaces
-- [ ] **4.8** Implement D-Bus error replies per `specs/dbus-interface/spec.md`
-- [ ] **4.9** Implement the D-Bus adapter as a `Surface` trait implementation wiring into the dispatcher
+- [x] **4.1** Add `zbus` dependency for async D-Bus on tokio
+- [x] **4.2** Implement the `org.axios.Companion1` interface struct with `zbus::interface` macro
+- [x] **4.3** Implement `SendMessage` method: create `TurnRequest`, dispatch, accumulate `Complete`, return string (or D-Bus error)
+- [x] **4.4** Implement `StreamMessage` method: create `TurnRequest`, dispatch, return immediately, emit `ResponseChunk`/`ResponseComplete`/`ResponseError` signals
+- [x] **4.5** Implement `ListSessions` method: query the session store, return array of tuples
+- [x] **4.6** Implement `GetStatus` method: return dict with uptime, active sessions, in-flight turns, version
+- [x] **4.7** Implement `GetActiveSurfaces` method: query the session store for distinct surfaces
+- [x] **4.8** Implement D-Bus error replies per `specs/dbus-interface/spec.md`
+- [x] **4.9** Implement the D-Bus adapter as a `Surface` trait implementation wiring into the dispatcher
 - [ ] **4.10** Integration test: start the daemon, call methods via `zbus` client, verify responses and signals
 
 ## Phase 5: Daemon lifecycle and systemd integration
