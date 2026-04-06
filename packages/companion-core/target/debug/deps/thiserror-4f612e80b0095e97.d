@@ -1,0 +1,14 @@
+/home/keith/Projects/axios-companion/packages/companion-core/target/debug/deps/thiserror-4f612e80b0095e97.d: /home/keith/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs /home/keith/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs /home/keith/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs /home/keith/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs /home/keith/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs /home/keith/Projects/axios-companion/packages/companion-core/target/debug/build/thiserror-1dfd353dcf534986/out/private.rs
+
+/home/keith/Projects/axios-companion/packages/companion-core/target/debug/deps/libthiserror-4f612e80b0095e97.rlib: /home/keith/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs /home/keith/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs /home/keith/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs /home/keith/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs /home/keith/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs /home/keith/Projects/axios-companion/packages/companion-core/target/debug/build/thiserror-1dfd353dcf534986/out/private.rs
+
+/home/keith/Projects/axios-companion/packages/companion-core/target/debug/deps/libthiserror-4f612e80b0095e97.rmeta: /home/keith/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs /home/keith/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs /home/keith/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs /home/keith/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs /home/keith/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs /home/keith/Projects/axios-companion/packages/companion-core/target/debug/build/thiserror-1dfd353dcf534986/out/private.rs
+
+/home/keith/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs:
+/home/keith/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs:
+/home/keith/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs:
+/home/keith/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs:
+/home/keith/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs:
+/home/keith/Projects/axios-companion/packages/companion-core/target/debug/build/thiserror-1dfd353dcf534986/out/private.rs:
+
+# env-dep:OUT_DIR=/home/keith/Projects/axios-companion/packages/companion-core/target/debug/build/thiserror-1dfd353dcf534986/out

@@ -2,21 +2,21 @@
 
 ## Phase 1: Project scaffolding and Rust workspace
 
-- [ ] **1.1** Create Rust project at `packages/companion-core/` with `Cargo.toml` and `src/main.rs` (tokio async main, tracing init, placeholder event loop)
-- [ ] **1.2** Create `packages/companion-core/default.nix` using `rustPlatform.buildRustPackage` (or crane — whichever is already available in the flake's nixpkgs)
-- [ ] **1.3** Wire `packages.${system}.companion-core` into `flake.nix`
-- [ ] **1.4** Add `devShells.default` with Rust toolchain (rustc, cargo, rust-analyzer, clippy, rustfmt) if not already present
-- [ ] **1.5** Verify `nix build .#companion-core` produces a binary that starts and exits cleanly
+- [x] **1.1** Create Rust project at `packages/companion-core/` with `Cargo.toml` and `src/main.rs` (tokio async main, tracing init, placeholder event loop)
+- [x] **1.2** Create `packages/companion-core/default.nix` using `rustPlatform.buildRustPackage` (or crane — whichever is already available in the flake's nixpkgs)
+- [x] **1.3** Wire `packages.${system}.companion-core` into `flake.nix`
+- [x] **1.4** Add `devShells.default` with Rust toolchain (rustc, cargo, rust-analyzer, clippy, rustfmt) if not already present
+- [x] **1.5** Verify `nix build .#companion-core` produces a binary that starts and exits cleanly
 
 ## Phase 2: Session store (SQLite)
 
-- [ ] **2.1** Add `rusqlite` dependency (with `bundled` feature for static SQLite)
-- [ ] **2.2** Implement schema creation and migration logic: `schema_version` table, version check on startup, apply pending migrations
-- [ ] **2.3** Implement `sessions` table creation (schema version 1) per `specs/session-store/spec.md`
-- [ ] **2.4** Implement CRUD operations: `create_session`, `lookup_session`, `set_claude_session_id`, `touch_session`, `list_sessions`, `list_by_surface`
-- [ ] **2.5** Enable WAL mode on connection open
-- [ ] **2.6** Unit tests for all store operations (in-memory SQLite for test speed)
-- [ ] **2.7** Verify database file is created at `$XDG_DATA_HOME/axios-companion/sessions.db` when run from the binary
+- [x] **2.1** Add `rusqlite` dependency (with `bundled` feature for static SQLite)
+- [x] **2.2** Implement schema creation and migration logic: `schema_version` table, version check on startup, apply pending migrations
+- [x] **2.3** Implement `sessions` table creation (schema version 1) per `specs/session-store/spec.md`
+- [x] **2.4** Implement CRUD operations: `create_session`, `lookup_session`, `set_claude_session_id`, `touch_session`, `list_sessions`, `list_by_surface`
+- [x] **2.5** Enable WAL mode on connection open
+- [x] **2.6** Unit tests for all store operations (in-memory SQLite for test speed)
+- [x] **2.7** Verify database file is created at `$XDG_DATA_HOME/axios-companion/sessions.db` when run from the binary
 
 ## Phase 3: Dispatcher core
 
