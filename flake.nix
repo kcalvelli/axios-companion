@@ -68,6 +68,7 @@
         {
           default = referenceCompanion;
           personaDefault = personaDefault;
+          companion-core = pkgs.callPackage ./packages/companion-core { };
         }
       );
 
@@ -104,6 +105,11 @@
               nixfmt-rfc-style
               git
               gh
+              cargo
+              rustc
+              rust-analyzer
+              clippy
+              rustfmt
             ];
 
             shellHook = ''

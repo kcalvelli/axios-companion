@@ -1,0 +1,11 @@
+[package]
+name = "companion-core"
+version = "0.1.0"
+edition = "2021"
+description = "axios-companion daemon — persistent session manager and D-Bus control plane"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-journald = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
