@@ -213,6 +213,7 @@ in
           TimeoutStopSec = 130;
           Environment = [
             "XDG_DATA_HOME=${config.xdg.dataHome}"
+            "PATH=${cfg.package}/bin:${cfg.daemon.package}/bin:/run/current-system/sw/bin"
           ] ++ lib.optionals cfg.gateway.openai.enable [
             "COMPANION_GATEWAY_ENABLE=1"
             "COMPANION_GATEWAY_PORT=${toString cfg.gateway.openai.port}"
