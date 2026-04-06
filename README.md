@@ -43,7 +43,7 @@ See [ROADMAP.md](./ROADMAP.md) for the full build order and which OpenSpec propo
 
 ## Getting started
 
-> **Tier 0 is functional.** The `companion` wrapper, the home-manager module, and the default character-free persona all work today. Layering your own character on top is covered in [Authoring a persona](#authoring-a-persona) below. Tier 1+ proposals are still in the OpenSpec queue — see [ROADMAP.md](./ROADMAP.md).
+> **Tier 0 + daemon-core are functional.** The `companion` wrapper, the home-manager module, and the default character-free persona all work today. The Tier 1 daemon (`companion-core`) is live — a systemd user service with D-Bus control plane, persistent session routing, and streaming support. Layering your own character on top is covered in [Authoring a persona](#authoring-a-persona) below. See [ROADMAP.md](./ROADMAP.md) for what's next.
 
 Adding axios-companion to a NixOS + home-manager system looks like this:
 
@@ -62,6 +62,10 @@ Adding axios-companion to a NixOS + home-manager system looks like this:
 
   services.axios-companion = {
     enable = true;
+
+    # Optional: start the Tier 1 daemon (D-Bus, session routing, streaming)
+    daemon.enable = true;
+
     # Optional: layer your own persona files on top of the minimal default
     persona.userFile = ./my-user-context.md;
     persona.extraFiles = [ ./my-persona-voice.md ];
@@ -90,6 +94,35 @@ The first time you invoke `companion` after enabling the module, the wrapper sca
 4. **Claude launches** with the composed persona as its system prompt, the workspace attached via `--add-dir`, and — if detected — your mcp-gateway config loaded.
 
 Subsequent invocations skip scaffolding entirely and do not touch anything in the workspace. You can edit `USER.md`, add new files, delete things, or rearrange the directory freely between runs — the wrapper treats the workspace as yours after that first invocation.
+
+### The daemon (Tier 1)
+
+When `daemon.enable = true`, the home-manager module installs and starts `companion-core` — a systemd user service that turns the one-shot wrapper into a live service:
+
+- **D-Bus control plane** on `org.axios.Companion` with methods for sending messages, streaming responses, listing sessions, and querying status
+- **Persistent session routing** — maps `(surface, conversation_id)` pairs to Claude sessions in SQLite, survives daemon restarts
+- **Turn serialization** — one subprocess per session at a time, concurrent sessions run in parallel
+- **Streaming** — `StreamMessage` returns immediately and emits `ResponseChunk` / `ResponseComplete` / `ResponseError` signals
+
+The daemon invokes the same `companion` wrapper for every turn — it doesn't bypass persona resolution or workspace injection. Think of it as a persistent supervisor that knows how to route conversations.
+
+```bash
+# Check daemon status
+systemctl --user status companion-core
+
+# Send a message via D-Bus
+busctl --user call org.axios.Companion /org/axios/Companion \
+  org.axios.Companion1 SendMessage sss "dbus" "test" "hello"
+
+# List active sessions
+busctl --user call org.axios.Companion /org/axios/Companion \
+  org.axios.Companion1 ListSessions
+
+# Watch the journal
+journalctl --user -u companion-core -f
+```
+
+The daemon is the foundation for all Tier 1 features — the OpenAI gateway, channel adapters, CLI client, and TUI dashboard all connect through its dispatcher.
 
 ### MCP tool integration
 
@@ -187,8 +220,7 @@ axios-companion/
 ├── openspec/
 │   ├── config.yaml             # Context, non-goals, and architectural rules
 │   └── changes/
-│       ├── bootstrap/          # Tier 0: shell wrapper + module + default persona
-│       ├── daemon-core/        # Tier 1 foundation
+│       ├── archive/            # Completed proposals (bootstrap, daemon-core)
 │       ├── cli-client/         # Tier 1 CLI subcommands
 │       ├── tui-dashboard/      # Tier 1 terminal dashboard
 │       ├── channel-telegram/   # Tier 1 first channel adapter

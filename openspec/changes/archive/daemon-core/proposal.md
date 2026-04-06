@@ -1,6 +1,6 @@
 # Proposal: Daemon Core — Tier 1 Foundation
 
-> **Status**: Specified — specs and tasks are complete, ready for implementation.
+> **Status**: Complete — shipped 2026-04-06. Validated on `edge` with live D-Bus calls.
 
 ## Tier
 

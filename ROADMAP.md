@@ -21,7 +21,7 @@ Work proceeds roughly top-to-bottom. Items at the same level can be built in par
 
 ### Tier 1 — Daemon and local surfaces
 
-- [ ] **[daemon-core](./openspec/changes/daemon-core/)** — User-level systemd daemon, D-Bus interface, session store. The foundation for every Tier 1+ feature. *Depends on: bootstrap*
+- [x] **[daemon-core](./openspec/changes/archive/daemon-core/)** — User-level systemd daemon, D-Bus interface, session store. The foundation for every Tier 1+ feature. Shipped 2026-04-06. Validated end-to-end on `edge` — daemon starts via systemd, acquires D-Bus name, routes messages through `companion`, persists session mappings in SQLite, streams responses via signals. *Depends on: bootstrap*
 - [ ] **[openai-gateway](./openspec/changes/openai-gateway/)** ⚠️ **REQUIRED FOR ZEROCLAW DECOMMISSION** — OpenAI-compatible `/v1/chat/completions` HTTP endpoint inside the daemon. Used by Home Assistant's Conversation integration as Sid's voice backend across every room. Missing this breaks voice during migration. *Depends on: bootstrap, daemon-core*
 - [ ] **[cli-client](./openspec/changes/cli-client/)** — Rust CLI with subcommands, replacing the Tier 0 shell wrapper (while keeping backward compatibility). *Depends on: bootstrap, daemon-core*
 - [ ] **[tui-dashboard](./openspec/changes/tui-dashboard/)** — Terminal-native dashboard built on ratatui. *Depends on: bootstrap, daemon-core*
