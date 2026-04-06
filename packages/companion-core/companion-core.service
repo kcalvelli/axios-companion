@@ -1,0 +1,20 @@
+# companion-core.service — axios-companion daemon
+#
+# This is a reference unit file. The home-manager module generates the
+# actual unit with the correct ExecStart path from the Nix store.
+# See modules/home-manager/ for the real thing.
+
+[Unit]
+Description=axios-companion daemon
+Documentation=https://github.com/kcalvelli/axios-companion
+
+[Service]
+Type=notify
+ExecStart=%h/.nix-profile/bin/companion-core
+Restart=on-failure
+RestartSec=5
+# Give in-flight turns time to drain on stop.
+TimeoutStopSec=130
+
+[Install]
+WantedBy=default.target

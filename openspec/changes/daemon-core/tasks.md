@@ -45,12 +45,12 @@
 
 ## Phase 5: Daemon lifecycle and systemd integration
 
-- [ ] **5.1** Wire `main()`: init tracing → open session store → init dispatcher → acquire D-Bus name → enter event loop
-- [ ] **5.2** Implement `sd_notify(READY=1)` via the `sd-notify` crate after successful initialization
-- [ ] **5.3** Implement SIGTERM handler: stop accepting D-Bus calls, drain in-flight turns (120s timeout), close connections, exit 0
-- [ ] **5.4** Implement SIGHUP handler: log and ignore (reserved for future use)
-- [ ] **5.5** Verify error recovery: subprocess crash does not crash daemon, daemon continues accepting requests
-- [ ] **5.6** Create the systemd unit file template: `companion-core.service` (Type=notify, Restart=on-failure, RestartSec=5)
+- [x] **5.1** Wire `main()`: init tracing → open session store → init dispatcher → acquire D-Bus name → enter event loop
+- [x] **5.2** Implement `sd_notify(READY=1)` via the `sd-notify` crate after successful initialization
+- [x] **5.3** Implement SIGTERM handler: stop accepting D-Bus calls, drain in-flight turns (120s timeout), close connections, exit 0
+- [x] **5.4** Implement SIGHUP handler: log and ignore (reserved for future use)
+- [x] **5.5** Verify error recovery: subprocess crash does not crash daemon, daemon continues accepting requests
+- [x] **5.6** Create the systemd unit file template: `companion-core.service` (Type=notify, Restart=on-failure, RestartSec=5)
 
 ## Phase 6: Home-manager module updates
 
