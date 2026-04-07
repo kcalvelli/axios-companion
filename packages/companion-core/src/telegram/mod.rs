@@ -247,9 +247,9 @@ async fn handle_command(
             drop(store);
 
             let reply = if had_session {
-                "Session cleared. Next message starts fresh."
+                "Fine. Everything we just talked about? Gone. Hope it wasn't important."
             } else {
-                "No active session to clear. You're already starting fresh."
+                "There's nothing to forget. We haven't even started yet."
             };
             let _ = bot.send_message(chat_id, reply).await;
             info!(chat_id = %chat_id, "telegram /new — session reset");
