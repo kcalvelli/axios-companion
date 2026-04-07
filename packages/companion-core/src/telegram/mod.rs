@@ -225,6 +225,86 @@ async fn run_polling(
 // Message handler
 // ---------------------------------------------------------------------------
 
+/// Handle Telegram slash commands. Returns true if the command was recognized
+/// and handled (caller should return early).
+async fn handle_command(
+    bot: &Bot,
+    chat_id: ChatId,
+    conversation_id: &str,
+    text: &str,
+    dispatcher: &Dispatcher,
+) -> bool {
+    // Strip bot username suffix from commands (e.g. "/new@SidFridayBot" → "/new")
+    let cmd = text.split_whitespace().next().unwrap_or("");
+    let cmd = cmd.split('@').next().unwrap_or(cmd);
+
+    match cmd {
+        "/new" => {
+            let store = dispatcher.store().await;
+            let had_session = store
+                .delete_session("telegram", conversation_id)
+                .unwrap_or(false);
+            drop(store);
+
+            let reply = if had_session {
+                "Session cleared. Next message starts fresh."
+            } else {
+                "No active session to clear. You're already starting fresh."
+            };
+            let _ = bot.send_message(chat_id, reply).await;
+            info!(chat_id = %chat_id, "telegram /new — session reset");
+            true
+        }
+        "/status" => {
+            let store = dispatcher.store().await;
+            let session = store.lookup_session("telegram", conversation_id).ok().flatten();
+            drop(store);
+
+            let reply = match session {
+                Some(s) => {
+                    let claude_id = s.claude_session_id.as_deref().unwrap_or("(not yet assigned)");
+                    format!(
+                        "Session active\nClaude session: {}\nLast active: {}",
+                        claude_id,
+                        format_timestamp(s.last_active_at),
+                    )
+                }
+                None => "No active session. Send a message to start one.".to_string(),
+            };
+            let _ = bot.send_message(chat_id, reply).await;
+            true
+        }
+        "/help" => {
+            let reply = "\
+/new — clear session, start fresh\n\
+/status — show current session info\n\
+/help — this message\n\
+\n\
+Everything else goes straight to the companion.";
+            let _ = bot.send_message(chat_id, reply).await;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Format a unix timestamp for display.
+fn format_timestamp(ts: i64) -> String {
+    use std::time::{Duration, UNIX_EPOCH};
+    let dt = UNIX_EPOCH + Duration::from_secs(ts as u64);
+    let elapsed = dt.elapsed().unwrap_or_default();
+    let mins = elapsed.as_secs() / 60;
+    if mins < 1 {
+        "just now".to_string()
+    } else if mins < 60 {
+        format!("{}m ago", mins)
+    } else if mins < 1440 {
+        format!("{}h ago", mins / 60)
+    } else {
+        format!("{}d ago", mins / 1440)
+    }
+}
+
 async fn handle_message(
     bot: Bot,
     msg: Message,
@@ -285,6 +365,15 @@ async fn handle_message(
 
     let chat_id = msg.chat.id;
     let conversation_id = chat_id.0.to_string();
+
+    // Handle slash commands before dispatching.
+    let trimmed = text.trim();
+    if trimmed.starts_with('/') {
+        if handle_command(&bot, chat_id, &conversation_id, trimmed, dispatcher).await {
+            return;
+        }
+        // Not a recognized command — fall through and send to companion.
+    }
 
     info!(
         user_id = %user_id,

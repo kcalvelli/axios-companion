@@ -198,6 +198,15 @@ impl SessionStore {
         Ok(sessions)
     }
 
+    /// Delete a session by (surface, conversation_id). Returns true if a row was deleted.
+    pub fn delete_session(&self, surface: &str, conversation_id: &str) -> Result<bool, StoreError> {
+        let count = self.conn.execute(
+            "DELETE FROM sessions WHERE surface = ?1 AND conversation_id = ?2",
+            params![surface, conversation_id],
+        )?;
+        Ok(count > 0)
+    }
+
     /// List sessions for a specific surface, most recently active first.
     pub fn list_by_surface(&self, surface: &str) -> Result<Vec<Session>, StoreError> {
         let mut stmt = self.conn.prepare(
@@ -311,6 +320,24 @@ mod tests {
 
         let telegram = store.list_by_surface("telegram").unwrap();
         assert_eq!(telegram.len(), 1);
+    }
+
+    #[test]
+    fn delete_session_removes_row() {
+        let store = SessionStore::open_in_memory().unwrap();
+        store.create_session("telegram", "chat-1").unwrap();
+
+        let deleted = store.delete_session("telegram", "chat-1").unwrap();
+        assert!(deleted);
+        assert!(store.lookup_session("telegram", "chat-1").unwrap().is_none());
+
+        // Deleting again returns false.
+        let deleted_again = store.delete_session("telegram", "chat-1").unwrap();
+        assert!(!deleted_again);
+
+        // Can re-create after delete.
+        store.create_session("telegram", "chat-1").unwrap();
+        assert!(store.lookup_session("telegram", "chat-1").unwrap().is_some());
     }
 
     #[test]
