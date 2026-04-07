@@ -1,6 +1,6 @@
 # Proposal: CLI Client — Tier 1 Rich Command-Line Interface
 
-> **Status**: Skeleton — this proposal is a roadmap placeholder. Full specs and tasks will be drafted when this change is picked up.
+> **Status**: Active — core subcommands shipped (send, chat, status, sessions list, surfaces, stdin mode). Deferred: logs, session show/resume/delete, memory, shell completions, passthrough mode.
 
 ## Tier
 

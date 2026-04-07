@@ -69,6 +69,7 @@
           default = referenceCompanion;
           personaDefault = personaDefault;
           companion-core = pkgs.callPackage ./packages/companion-core { };
+          companion-cli = pkgs.callPackage ./packages/cli-client { };
         }
       );
 

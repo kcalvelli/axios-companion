@@ -33,6 +33,14 @@ let
     defaultWorkspace = cfg.workspaceDir;
     mcpConfigFile = cfg.mcpConfigFile;
   };
+
+  # When the CLI is active, the shell wrapper's `companion` binary would
+  # collide with the CLI's `companion` binary. This alias package exposes
+  # the wrapper as `companion-code` so users can bypass the daemon.
+  companionRaw = pkgs.runCommand "companion-code" { } ''
+    mkdir -p $out/bin
+    ln -s ${builtCompanion}/bin/companion $out/bin/companion-code
+  '';
 in
 {
   options.services.axios-companion = {
@@ -145,6 +153,21 @@ in
       };
     };
 
+    cli = {
+      enable = lib.mkEnableOption "companion CLI (Tier 1 Rust binary replacing the shell wrapper)";
+
+      package = lib.mkOption {
+        type = lib.types.package;
+        default = self.packages.${pkgs.system}.companion-cli;
+        defaultText = lib.literalExpression "inputs.axios-companion.packages.\${pkgs.system}.companion-cli";
+        description = ''
+          The companion CLI package. When enabled, this replaces the Tier 0
+          shell wrapper as the `companion` binary on the user's PATH. The
+          shell wrapper remains available as `companion-code`.
+        '';
+      };
+    };
+
     gateway.openai = {
       enable = lib.mkEnableOption "OpenAI-compatible HTTP gateway inside the companion daemon";
 
@@ -191,7 +214,21 @@ in
 
   config = lib.mkIf cfg.enable (lib.mkMerge [
     {
-      home.packages = [ cfg.package ];
+      assertions = [
+        {
+          assertion = cfg.cli.enable -> cfg.daemon.enable;
+          message = "services.axios-companion.cli requires daemon.enable — the CLI talks to the daemon via D-Bus";
+        }
+      ];
+
+      # When the CLI is active it owns the `companion` name on the user's
+      # PATH. The shell wrapper is still installed as `companion-code`.
+      # When the CLI is off, the shell wrapper is installed as `companion`.
+      home.packages =
+        if cfg.cli.enable then
+          [ cfg.cli.package companionRaw ]
+        else
+          [ cfg.package ];
     }
 
     (lib.mkIf cfg.daemon.enable {
