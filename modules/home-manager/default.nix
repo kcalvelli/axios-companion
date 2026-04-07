@@ -182,6 +182,50 @@ in
       };
     };
 
+    channels.telegram = {
+      enable = lib.mkEnableOption "Telegram channel adapter inside the companion daemon";
+
+      botTokenFile = lib.mkOption {
+        type = lib.types.path;
+        description = ''
+          Path to a file containing the Telegram bot token (one line,
+          no trailing newline). Compatible with agenix-managed secrets.
+        '';
+        example = lib.literalExpression "/run/agenix/telegram-bot-token";
+      };
+
+      allowedUsers = lib.mkOption {
+        type = lib.types.listOf lib.types.int;
+        default = [ ];
+        description = ''
+          List of Telegram user IDs allowed to message the bot.
+          Empty list means nobody gets through — deny by default.
+          Find your user ID by messaging @userinfobot on Telegram.
+        '';
+        example = [ 123456789 ];
+      };
+
+      mentionOnly = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          When true, the bot only responds in group chats when
+          @mentioned. Private messages are always handled regardless
+          of this setting.
+        '';
+      };
+
+      streamMode = lib.mkOption {
+        type = lib.types.enum [ "single_message" "multi_message" ];
+        default = "single_message";
+        description = ''
+          How to render streaming responses.
+          `single_message`: edit a single message in place as chunks arrive.
+          `multi_message`: collect full response, split at 4096-char boundaries.
+        '';
+      };
+    };
+
     gateway.openai = {
       enable = lib.mkEnableOption "OpenAI-compatible HTTP gateway inside the companion daemon";
 
@@ -237,6 +281,10 @@ in
           assertion = cfg.tui.enable -> cfg.daemon.enable;
           message = "services.axios-companion.tui requires daemon.enable — the TUI talks to the daemon via D-Bus";
         }
+        {
+          assertion = cfg.channels.telegram.enable -> cfg.daemon.enable;
+          message = "services.axios-companion.channels.telegram requires daemon.enable — the adapter runs inside the daemon";
+        }
       ];
 
       # When the CLI is active it owns the `companion` name on the user's
@@ -275,6 +323,12 @@ in
             "COMPANION_GATEWAY_BIND=${cfg.gateway.openai.bindAddress}"
             "COMPANION_GATEWAY_MODEL=${cfg.gateway.openai.modelName}"
             "COMPANION_GATEWAY_SESSION_POLICY=${cfg.gateway.openai.sessionPolicy}"
+          ] ++ lib.optionals cfg.channels.telegram.enable [
+            "COMPANION_TELEGRAM_ENABLE=1"
+            "COMPANION_TELEGRAM_BOT_TOKEN_FILE=${cfg.channels.telegram.botTokenFile}"
+            "COMPANION_TELEGRAM_ALLOWED_USERS=${lib.concatMapStringsSep "," toString cfg.channels.telegram.allowedUsers}"
+            "COMPANION_TELEGRAM_MENTION_ONLY=${if cfg.channels.telegram.mentionOnly then "1" else "0"}"
+            "COMPANION_TELEGRAM_STREAM_MODE=${cfg.channels.telegram.streamMode}"
           ];
         };
 

@@ -18,6 +18,10 @@ sd-notify = "0.4"
 axum = "0.8"
 tokio-stream = "0.1"
 uuid = { version = "1", features = ["v4"] }
+teloxide = { version = "0.13", default-features = false, features = ["macros", "rustls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+futures = "0.3"
+log = "0.4"
 
 [dev-dependencies]
 tempfile = "3"

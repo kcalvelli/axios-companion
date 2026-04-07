@@ -2,6 +2,7 @@ mod dbus;
 mod dispatcher;
 mod gateway;
 mod store;
+mod telegram;
 
 use std::sync::Arc;
 
@@ -98,6 +99,25 @@ async fn main() {
         None
     };
 
+    // 5b. Start the Telegram channel adapter if enabled via environment.
+    let telegram_shutdown = Arc::new(tokio::sync::Notify::new());
+    let telegram_handle = if let Some(config) = telegram::TelegramConfig::from_env() {
+        info!(
+            allowed_users = config.allowed_users.len(),
+            mention_only = config.mention_only,
+            stream_mode = ?config.stream_mode,
+            "starting Telegram adapter"
+        );
+        let notify = telegram_shutdown.clone();
+        let tg_dispatcher = dispatcher.clone();
+        Some(tokio::spawn(async move {
+            telegram::serve(tg_dispatcher, config, notify).await;
+        }))
+    } else {
+        info!("Telegram adapter disabled (COMPANION_TELEGRAM_ENABLE != 1)");
+        None
+    };
+
     // 6. Signal readiness via sd_notify(READY=1).
     if let Err(e) = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]) {
         warn!(%e, "sd_notify READY=1 failed (not running under systemd?)");
@@ -127,9 +147,14 @@ async fn main() {
         }
     }
 
-    // Graceful shutdown: signal the gateway to stop, then wait for it.
+    // Graceful shutdown: signal adapters to stop, then wait for them.
     shutdown_notify.notify_one();
+    telegram_shutdown.notify_one();
+
     if let Some(handle) = gateway_handle {
+        let _ = handle.await;
+    }
+    if let Some(handle) = telegram_handle {
         let _ = handle.await;
     }
 
