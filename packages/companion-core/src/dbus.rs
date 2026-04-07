@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use zbus::object_server::SignalEmitter;
 use zbus::{interface, Connection};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::dispatcher::{Dispatcher, TurnEvent, TurnRequest};
 
@@ -35,7 +35,6 @@ impl CompanionInterface {
     /// Submit a message and block until the full response is available.
     async fn send_message(
         &self,
-        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
         surface: &str,
         conversation_id: &str,
         message: &str,
@@ -63,25 +62,10 @@ impl CompanionInterface {
                     // SendMessage doesn't stream — just wait for Complete.
                 }
                 TurnEvent::Complete(text) => {
-                    result = text.clone();
-                    // Emit ResponseComplete signal for monitoring clients.
-                    let _ = Self::response_complete(
-                        &emitter,
-                        surface,
-                        conversation_id,
-                        &text,
-                    )
-                    .await;
+                    result = text;
                     break;
                 }
                 TurnEvent::Error(e) => {
-                    let _ = Self::response_error(
-                        &emitter,
-                        surface,
-                        conversation_id,
-                        &e,
-                    )
-                    .await;
                     error_msg = Some(e);
                     break;
                 }
@@ -99,7 +83,6 @@ impl CompanionInterface {
     /// Submit a message and return immediately. Response chunks arrive via signals.
     async fn stream_message(
         &self,
-        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
         surface: &str,
         conversation_id: &str,
         message: &str,
@@ -120,44 +103,12 @@ impl CompanionInterface {
         let in_flight = self.in_flight.clone();
         in_flight.fetch_add(1, Ordering::Relaxed);
 
-        // Owned copies for the spawned task.
-        let surface = surface.to_string();
-        let conversation_id = conversation_id.to_string();
-        let emitter = emitter.to_owned();
-
+        // The caller's receiver keeps the turn alive. Signals are emitted
+        // by the broadcast subscriber (started in serve()), not here.
         tokio::spawn(async move {
-            while let Some(event) = rx.recv().await {
-                match event {
-                    TurnEvent::TextChunk(chunk) => {
-                        let _ = Self::response_chunk(
-                            &emitter,
-                            &surface,
-                            &conversation_id,
-                            &chunk,
-                        )
-                        .await;
-                    }
-                    TurnEvent::Complete(text) => {
-                        let _ = Self::response_complete(
-                            &emitter,
-                            &surface,
-                            &conversation_id,
-                            &text,
-                        )
-                        .await;
-                        break;
-                    }
-                    TurnEvent::Error(e) => {
-                        let _ = Self::response_error(
-                            &emitter,
-                            &surface,
-                            &conversation_id,
-                            &e,
-                        )
-                        .await;
-                        break;
-                    }
-                }
+            while let Some(_event) = rx.recv().await {
+                // Just drain the channel to keep the turn alive.
+                // The broadcast subscriber handles D-Bus signal emission.
             }
             in_flight.fetch_sub(1, Ordering::Relaxed);
         });
@@ -262,8 +213,11 @@ impl CompanionInterface {
     ) -> zbus::Result<()>;
 }
 
-/// Start the D-Bus server: acquire the bus name and serve the interface.
+/// Start the D-Bus server: acquire the bus name, serve the interface, and
+/// spawn a background task that emits D-Bus signals for all turn events
+/// across all surfaces (not just D-Bus-originated ones).
 pub async fn serve(dispatcher: Arc<Dispatcher>) -> zbus::Result<Connection> {
+    let mut broadcast_rx = dispatcher.subscribe();
     let iface = CompanionInterface::new(dispatcher);
 
     let connection = Connection::session().await?;
@@ -276,6 +230,67 @@ pub async fn serve(dispatcher: Arc<Dispatcher>) -> zbus::Result<Connection> {
     connection
         .request_name("org.axios.Companion")
         .await?;
+
+    // Spawn a task that subscribes to the dispatcher's broadcast channel
+    // and emits D-Bus signals for every turn event, regardless of surface.
+    let signal_conn = connection.clone();
+    tokio::spawn(async move {
+        loop {
+            match broadcast_rx.recv().await {
+                Ok(ev) => {
+                    let iface_ref = match signal_conn
+                        .object_server()
+                        .interface::<_, CompanionInterface>("/org/axios/Companion")
+                        .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            warn!(%e, "failed to get interface ref for signal emission");
+                            continue;
+                        }
+                    };
+                    let ctxt = iface_ref.signal_emitter();
+
+                    match ev.event {
+                        TurnEvent::TextChunk(chunk) => {
+                            let _ = CompanionInterface::response_chunk(
+                                &ctxt,
+                                &ev.surface,
+                                &ev.conversation_id,
+                                &chunk,
+                            )
+                            .await;
+                        }
+                        TurnEvent::Complete(text) => {
+                            let _ = CompanionInterface::response_complete(
+                                &ctxt,
+                                &ev.surface,
+                                &ev.conversation_id,
+                                &text,
+                            )
+                            .await;
+                        }
+                        TurnEvent::Error(error) => {
+                            let _ = CompanionInterface::response_error(
+                                &ctxt,
+                                &ev.surface,
+                                &ev.conversation_id,
+                                &error,
+                            )
+                            .await;
+                        }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(skipped = n, "broadcast subscriber lagged, some signals dropped");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    info!("broadcast channel closed, signal emitter stopping");
+                    break;
+                }
+            }
+        }
+    });
 
     info!("D-Bus interface ready on org.axios.Companion");
     Ok(connection)

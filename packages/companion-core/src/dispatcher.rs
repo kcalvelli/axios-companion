@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use tokio::io::AsyncBufReadExt;
 use tokio::process::Command;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
 use crate::store::SessionStore;
@@ -32,6 +32,16 @@ pub enum TurnEvent {
     Complete(String),
     /// Error description — emitted once, terminates the stream.
     Error(String),
+}
+
+/// A TurnEvent tagged with the surface and conversation it belongs to.
+/// Sent on the broadcast channel so observers (D-Bus signal emitter, etc.)
+/// can see all traffic regardless of which surface originated it.
+#[derive(Debug, Clone)]
+pub struct BroadcastEvent {
+    pub surface: String,
+    pub conversation_id: String,
+    pub event: TurnEvent,
 }
 
 // ---------------------------------------------------------------------------
@@ -83,16 +93,25 @@ pub struct Dispatcher {
     companion_cmd: String,
     /// Extra env vars to set on the subprocess. Empty in production.
     subprocess_env: HashMap<String, String>,
+    /// Broadcast channel for all turn events across all surfaces.
+    broadcast_tx: broadcast::Sender<BroadcastEvent>,
 }
 
 impl Dispatcher {
     pub fn new(store: SessionStore) -> Self {
+        let (broadcast_tx, _) = broadcast::channel(256);
         Self {
             store: Arc::new(Mutex::new(store)),
             session_locks: Mutex::new(HashMap::new()),
             companion_cmd: "companion".into(),
             subprocess_env: HashMap::new(),
+            broadcast_tx,
         }
+    }
+
+    /// Subscribe to the broadcast channel for all turn events.
+    pub fn subscribe(&self) -> broadcast::Receiver<BroadcastEvent> {
+        self.broadcast_tx.subscribe()
     }
 
     /// Get a lock on the session store (for D-Bus methods that query sessions directly).
@@ -107,11 +126,13 @@ impl Dispatcher {
         cmd: impl Into<String>,
         env: HashMap<String, String>,
     ) -> Self {
+        let (broadcast_tx, _) = broadcast::channel(256);
         Self {
             store: Arc::new(Mutex::new(store)),
             session_locks: Mutex::new(HashMap::new()),
             companion_cmd: cmd.into(),
             subprocess_env: env,
+            broadcast_tx,
         }
     }
 
@@ -135,11 +156,12 @@ impl Dispatcher {
         let store = self.store.clone();
         let cmd = self.companion_cmd.clone();
         let env = self.subprocess_env.clone();
+        let broadcast_tx = self.broadcast_tx.clone();
 
         tokio::spawn(async move {
             // Serialize turns within a session.
             let _guard = lock.lock().await;
-            Self::run_turn(store, req, tx, &cmd, &env).await;
+            Self::run_turn(store, req, tx, broadcast_tx, &cmd, &env).await;
         });
 
         rx
@@ -149,6 +171,7 @@ impl Dispatcher {
         store: Arc<Mutex<SessionStore>>,
         req: TurnRequest,
         tx: mpsc::Sender<TurnEvent>,
+        broadcast_tx: broadcast::Sender<BroadcastEvent>,
         companion_cmd: &str,
         extra_env: &HashMap<String, String>,
     ) {
@@ -165,12 +188,16 @@ impl Dispatcher {
                 Ok(None) => match store.create_session(&req.surface_id, &req.conversation_id) {
                     Ok(id) => (id, None),
                     Err(e) => {
-                        let _ = tx.send(TurnEvent::Error(format!("session store error: {e}"))).await;
+                        let err = TurnEvent::Error(format!("session store error: {e}"));
+                        let _ = broadcast_tx.send(BroadcastEvent { surface: req.surface_id.clone(), conversation_id: req.conversation_id.clone(), event: err.clone() });
+                        let _ = tx.send(err).await;
                         return;
                     }
                 },
                 Err(e) => {
-                    let _ = tx.send(TurnEvent::Error(format!("session store error: {e}"))).await;
+                    let err = TurnEvent::Error(format!("session store error: {e}"));
+                    let _ = broadcast_tx.send(BroadcastEvent { surface: req.surface_id.clone(), conversation_id: req.conversation_id.clone(), event: err.clone() });
+                    let _ = tx.send(err).await;
                     return;
                 }
             }
@@ -201,7 +228,9 @@ impl Dispatcher {
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
-                let _ = tx.send(TurnEvent::Error(format!("failed to spawn companion: {e}"))).await;
+                let err = TurnEvent::Error(format!("failed to spawn companion: {e}"));
+                let _ = broadcast_tx.send(BroadcastEvent { surface: req.surface_id.clone(), conversation_id: req.conversation_id.clone(), event: err.clone() });
+                let _ = tx.send(err).await;
                 return;
             }
         };
@@ -212,6 +241,21 @@ impl Dispatcher {
         let mut full_response = String::new();
         let mut captured_session_id = false;
         let start = std::time::Instant::now();
+
+        // Helper: send event to the caller's channel and the broadcast.
+        // Returns false if the caller dropped the receiver (cancellation).
+        let emit = |tx: &mpsc::Sender<TurnEvent>,
+                    broadcast_tx: &broadcast::Sender<BroadcastEvent>,
+                    surface: &str,
+                    conversation_id: &str,
+                    event: TurnEvent| {
+            let _ = broadcast_tx.send(BroadcastEvent {
+                surface: surface.to_string(),
+                conversation_id: conversation_id.to_string(),
+                event: event.clone(),
+            });
+            tx.try_send(event)
+        };
 
         // Parse stream-json output line by line.
         while let Ok(Some(line)) = reader.next_line().await {
@@ -241,7 +285,7 @@ impl Dispatcher {
                         for block in msg.content {
                             if let Some(text) = block.text {
                                 full_response.push_str(&text);
-                                if tx.send(TurnEvent::TextChunk(text)).await.is_err() {
+                                if emit(&tx, &broadcast_tx, &req.surface_id, &req.conversation_id, TurnEvent::TextChunk(text)).is_err() {
                                     // Receiver dropped — cancellation.
                                     info!("turn cancelled by surface, killing subprocess");
                                     let _ = child.kill().await;
@@ -260,7 +304,7 @@ impl Dispatcher {
                         turn_duration_ms = duration.as_millis() as u64,
                         "turn complete"
                     );
-                    let _ = tx.send(TurnEvent::Complete(result_text)).await;
+                    let _ = emit(&tx, &broadcast_tx, &req.surface_id, &req.conversation_id, TurnEvent::Complete(result_text));
                     break;
                 }
                 ("result", Some("error")) => {
@@ -271,7 +315,7 @@ impl Dispatcher {
                         error = %err_msg,
                         "turn failed"
                     );
-                    let _ = tx.send(TurnEvent::Error(err_msg)).await;
+                    let _ = emit(&tx, &broadcast_tx, &req.surface_id, &req.conversation_id, TurnEvent::Error(err_msg));
                     break;
                 }
                 (other_type, subtype) => {
@@ -288,18 +332,18 @@ impl Dispatcher {
         match child.wait().await {
             Ok(status) if !status.success() => {
                 let code = status.code().unwrap_or(-1);
-                // Only emit error if we haven't already sent a Complete or Error.
-                // The channel might be closed if we already sent a terminal event.
-                let _ = tx
-                    .send(TurnEvent::Error(format!(
-                        "companion exited with status {code}"
-                    )))
-                    .await;
+                let _ = emit(
+                    &tx, &broadcast_tx,
+                    &req.surface_id, &req.conversation_id,
+                    TurnEvent::Error(format!("companion exited with status {code}")),
+                );
             }
             Err(e) => {
-                let _ = tx
-                    .send(TurnEvent::Error(format!("failed to wait on companion: {e}")))
-                    .await;
+                let _ = emit(
+                    &tx, &broadcast_tx,
+                    &req.surface_id, &req.conversation_id,
+                    TurnEvent::Error(format!("failed to wait on companion: {e}")),
+                );
             }
             _ => {}
         }
