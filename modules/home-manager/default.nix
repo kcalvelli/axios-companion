@@ -168,6 +168,20 @@ in
       };
     };
 
+    tui = {
+      enable = lib.mkEnableOption "companion TUI dashboard (Tier 1 terminal monitoring)";
+
+      package = lib.mkOption {
+        type = lib.types.package;
+        default = self.packages.${pkgs.system}.companion-tui;
+        defaultText = lib.literalExpression "inputs.axios-companion.packages.\${pkgs.system}.companion-tui";
+        description = ''
+          The companion TUI dashboard package. Provides `companion-tui`
+          binary for terminal-native daemon monitoring.
+        '';
+      };
+    };
+
     gateway.openai = {
       enable = lib.mkEnableOption "OpenAI-compatible HTTP gateway inside the companion daemon";
 
@@ -219,6 +233,10 @@ in
           assertion = cfg.cli.enable -> cfg.daemon.enable;
           message = "services.axios-companion.cli requires daemon.enable — the CLI talks to the daemon via D-Bus";
         }
+        {
+          assertion = cfg.tui.enable -> cfg.daemon.enable;
+          message = "services.axios-companion.tui requires daemon.enable — the TUI talks to the daemon via D-Bus";
+        }
       ];
 
       # When the CLI is active it owns the `companion` name on the user's
@@ -264,6 +282,10 @@ in
           WantedBy = [ "default.target" ];
         };
       };
+    })
+
+    (lib.mkIf cfg.tui.enable {
+      home.packages = [ cfg.tui.package ];
     })
   ]);
 }
