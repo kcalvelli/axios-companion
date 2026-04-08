@@ -24,6 +24,7 @@ use tokio_xmpp::xmlstream::Timeouts;
 use tokio_xmpp::{Client, Event};
 use tracing::{debug, error, info, warn};
 use xmpp_parsers::message::{Lang, Message, MessageType};
+use xmpp_parsers::muc::muc::{History, Muc};
 use xmpp_parsers::presence::{Presence, Show as PresenceShow, Type as PresenceType};
 
 use crate::dispatcher::{Dispatcher, TurnEvent, TurnRequest};
@@ -208,6 +209,113 @@ fn parse_muc_rooms(raw: &str) -> Vec<MucRoom> {
         .collect()
 }
 
+/// Look up the bot's nick in a given MUC room. Returns `None` if the room
+/// is not in the configured list (which means we shouldn't be in it and
+/// any groupchat we received from it is suspect).
+fn nick_for_room<'a>(config: &'a XmppConfig, room: &BareJid) -> Option<&'a str> {
+    config
+        .muc_rooms
+        .iter()
+        .find(|r| &r.jid == room)
+        .map(|r| r.nick.as_str())
+}
+
+/// How a MUC body addressed (or didn't address) the bot.
+///
+/// This drives the `mention_only` decision in [`handle_groupchat_message`]:
+/// `Addressed` and `Mentioned` both cause the bot to respond, `None` causes
+/// the body to be dropped silently. The distinction between `Addressed` and
+/// `Mentioned` exists so address-style prefixes ("Sid: hello") can be
+/// stripped before dispatch — otherwise the persona reads its own name as
+/// the first token of every turn, which is annoying for the model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Addressing {
+    /// The body began with the bot's nick + a separator. The string is the
+    /// rest of the body with the prefix stripped.
+    Addressed(String),
+    /// The body contains an `@nick` reference somewhere. Body unchanged.
+    Mentioned,
+    /// The bot was not addressed. Drop in `mention_only` mode.
+    None,
+}
+
+/// Decide whether `body` addresses a bot named `nick`. Case-insensitive on
+/// the nick — humans are sloppy. The recognized prefix forms are:
+///
+/// - `Sid: hello` / `Sid, hello` / `Sid hello`
+/// - `@Sid: hello` / `@Sid, hello` / `@Sid hello`
+/// - bare `Sid` or bare `@Sid` (treated as a ping with empty body)
+///
+/// Beyond prefixes, any standalone `@Sid` token (followed by whitespace or
+/// punctuation, or at end of string) elsewhere in the body counts as a
+/// mention but does not modify the body — the @reference is presumably
+/// load-bearing in the user's sentence.
+///
+/// **Crucial false-positive case**: a body of `xojabo` (the room name) must
+/// NOT match a bot named anything other than `xojabo`. The fixture for this
+/// is in tests — John types "xojabo" in the xojabo room constantly and the
+/// bot must ignore him.
+fn parse_mention(body: &str, nick: &str) -> Addressing {
+    let trimmed = body.trim_start();
+
+    // Try to match `nick<sep>` or `@nick<sep>` at the start.
+    for prefix_len in [0usize, 1usize] {
+        // prefix_len = 0 → match "Sid..." ; prefix_len = 1 → match "@Sid..."
+        if prefix_len == 1 && !trimmed.starts_with('@') {
+            continue;
+        }
+        let after_at = &trimmed[prefix_len..];
+        if after_at.len() < nick.len() {
+            continue;
+        }
+        let (head, rest) = after_at.split_at(nick.len());
+        if !head.eq_ignore_ascii_case(nick) {
+            continue;
+        }
+        // What follows the nick token?
+        let next = rest.chars().next();
+        match next {
+            None => {
+                // Bare "Sid" or "@Sid" — treat as a ping with no payload.
+                return Addressing::Addressed(String::new());
+            }
+            Some(':') | Some(',') => {
+                // Strip the separator AND any leading whitespace after it.
+                return Addressing::Addressed(rest[1..].trim_start().to_string());
+            }
+            Some(c) if c.is_whitespace() => {
+                return Addressing::Addressed(rest.trim_start().to_string());
+            }
+            _ => {
+                // "Sidney", "Sidekick", etc — not a match, fall through.
+            }
+        }
+    }
+
+    // No prefix match. Look for a standalone @nick token elsewhere in the
+    // body. Word-boundary check on what follows; the @ before the nick is
+    // the boundary on the left.
+    let needle = format!("@{}", nick);
+    let needle_lower = needle.to_ascii_lowercase();
+    let body_lower = body.to_ascii_lowercase();
+    let mut search_from = 0;
+    while let Some(rel_idx) = body_lower[search_from..].find(&needle_lower) {
+        let idx = search_from + rel_idx;
+        let after_idx = idx + needle.len();
+        let next = body_lower[after_idx..].chars().next();
+        let is_boundary = match next {
+            None => true,
+            Some(c) => !c.is_alphanumeric() && c != '_',
+        };
+        if is_boundary {
+            return Addressing::Mentioned;
+        }
+        search_from = after_idx;
+    }
+
+    Addressing::None
+}
+
 // ---------------------------------------------------------------------------
 // Serve — entry point. Phase 2 lands the connect/auth/presence path and the
 // reconnect loop. DM/MUC message handling are Phase 3+ and live downstream.
@@ -309,12 +417,11 @@ async fn run_session(
                         error!(%e, "failed to send initial presence");
                         return Err(e);
                     }
-                    // TODO(channel-xmpp Phase 5): MUC join goes here.
                     if !config.muc_rooms.is_empty() {
-                        debug!(
-                            count = config.muc_rooms.len(),
-                            "MUC join deferred to Phase 5"
-                        );
+                        if let Err(e) = join_muc_rooms(&mut client, &config).await {
+                            error!(%e, "failed to send MUC joins");
+                            return Err(e);
+                        }
                     }
                 }
             }
@@ -323,27 +430,39 @@ async fn run_session(
                 return Err(err);
             }
             Event::Stanza(stanza) => {
-                // Phase 3: handle DM `<message type="chat">` only.
-                // Phase 5 will add the groupchat branch (with the loop trap
-                // mitigation — drop messages whose nick equals our own).
                 if let Ok(message) = Message::try_from(stanza) {
-                    if message.type_ == MessageType::Chat {
-                        if let Err(e) = handle_chat_message(
-                            &mut client,
-                            &message,
-                            &config,
-                            &dispatcher,
-                        )
-                        .await
-                        {
-                            warn!(%e, "error handling XMPP chat message");
+                    match message.type_ {
+                        MessageType::Chat => {
+                            if let Err(e) = handle_chat_message(
+                                &mut client,
+                                &message,
+                                &config,
+                                &dispatcher,
+                            )
+                            .await
+                            {
+                                warn!(%e, "error handling XMPP chat message");
+                            }
                         }
-                    } else {
-                        debug!(
-                            ty = ?message.type_,
-                            from = ?message.from,
-                            "ignoring non-chat message (Phase 3 handles DMs only)"
-                        );
+                        MessageType::Groupchat => {
+                            if let Err(e) = handle_groupchat_message(
+                                &mut client,
+                                &message,
+                                &config,
+                                &dispatcher,
+                            )
+                            .await
+                            {
+                                warn!(%e, "error handling XMPP groupchat message");
+                            }
+                        }
+                        _ => {
+                            debug!(
+                                ty = ?message.type_,
+                                from = ?message.from,
+                                "ignoring message of unhandled type"
+                            );
+                        }
                     }
                 }
             }
@@ -406,13 +525,15 @@ async fn handle_chat_message(
         "XMPP DM received"
     );
 
+    let conversation_id = sender_bare.to_string();
+
     // Bang commands short-circuit the dispatcher. We use `!` instead of `/`
     // because Gajim (and probably other XMPP clients) intercept slash
     // commands locally for /me, /say, /clear, MUC moderation, etc — they
     // never reach the wire. Bang is the standard XMPP/IRC bot convention.
     let trimmed = body.trim();
     if trimmed.starts_with('!') {
-        let reply_text = handle_command(&sender_bare, trimmed, dispatcher).await;
+        let reply_text = handle_command(&conversation_id, trimmed, dispatcher).await;
         send_chat_reply(client, &sender_bare, &reply_text).await?;
         return Ok(());
     }
@@ -420,7 +541,7 @@ async fn handle_chat_message(
     // Build the turn request and dispatch.
     let turn_req = TurnRequest {
         surface_id: "xmpp".into(),
-        conversation_id: sender_bare.to_string(),
+        conversation_id,
         message_text: body,
     };
     let mut rx = dispatcher.dispatch(turn_req).await;
@@ -450,6 +571,167 @@ async fn handle_chat_message(
     send_chat_reply(client, &sender_bare, &full_text).await
 }
 
+/// Handle one inbound `<message type="groupchat">`. Phase 5.
+///
+/// The execution order matters and is load-bearing — change with care:
+///
+/// 1. **Resolve room and sender nick.** Drop on parse failure.
+/// 2. **Loop trap drop.** If the sender nick == our nick in this room, this
+///    message is the server echoing our own outbound stanza. Drop it
+///    without logging at info level — empirically confirmed in the spike,
+///    and the canonical infinite-loop bug from the ZeroClaw incident lives
+///    here.
+/// 3. **Body extraction.** Empty body = chat state notification, drop.
+/// 4. **Mention parsing** (only if `mention_only`). Address-style prefixes
+///    are stripped from the body before dispatch; `@nick` references are
+///    accepted with the body unchanged; everything else is dropped.
+/// 5. **Bang commands** are honored only on addressed messages. Reply goes
+///    to the room as groupchat so everyone sees the result of `!new`.
+/// 6. **Dispatch** with `conversation_id = room_bare.to_string()` — the
+///    room is one conversation with the bot, not per-user-in-room.
+///    Allowlist is BYPASSED for groupchat: room membership is the access
+///    control boundary (per task 5.7).
+async fn handle_groupchat_message(
+    client: &mut Client,
+    message: &Message,
+    config: &XmppConfig,
+    dispatcher: &Dispatcher,
+) -> Result<(), tokio_xmpp::Error> {
+    let from_jid = match message.from.as_ref() {
+        Some(j) => j,
+        None => {
+            debug!("dropping groupchat message with no `from`");
+            return Ok(());
+        }
+    };
+    let room_bare = from_jid.to_bare();
+    let sender_nick = match from_jid.resource() {
+        Some(r) => r.as_str(),
+        None => {
+            // No resource = sent by the room itself (subject changes,
+            // history end markers, etc). Nothing to respond to.
+            debug!(room = %room_bare, "dropping groupchat with no resource (room-level stanza)");
+            return Ok(());
+        }
+    };
+
+    // Look up our nick in this room. If we don't have an entry, the bot
+    // wasn't told to be in this room — log loud and bail.
+    let our_nick = match nick_for_room(config, &room_bare) {
+        Some(n) => n,
+        None => {
+            warn!(
+                room = %room_bare,
+                "received groupchat from a room not in muc_rooms config — dropping"
+            );
+            return Ok(());
+        }
+    };
+
+    // LOOP TRAP. If this is our own message coming back, drop it. The
+    // ZeroClaw `# Disabled: MUC loop issue` incident lives in this branch
+    // — without this drop, the bot responds to itself until you pull the
+    // plug. The cost of forgetting this is real token burn.
+    if sender_nick == our_nick {
+        debug!(
+            room = %room_bare,
+            nick = %sender_nick,
+            "dropping own groupchat echo (loop trap)"
+        );
+        return Ok(());
+    }
+
+    // Body extraction. Empty body = chat state notification, drop.
+    let body = match message.bodies.values().next() {
+        Some(b) => b.clone(),
+        None => {
+            debug!(
+                room = %room_bare,
+                from = %sender_nick,
+                "dropping groupchat with no body"
+            );
+            return Ok(());
+        }
+    };
+
+    // Mention parsing: in mention_only mode, decide whether to respond and
+    // (for address-style prefixes) what body text to send to the dispatcher.
+    let dispatch_body = if config.mention_only {
+        match parse_mention(&body, our_nick) {
+            Addressing::Addressed(stripped) => stripped,
+            Addressing::Mentioned => body.clone(),
+            Addressing::None => {
+                debug!(
+                    room = %room_bare,
+                    from = %sender_nick,
+                    "dropping groupchat: not addressed and mention_only is on"
+                );
+                return Ok(());
+            }
+        }
+    } else {
+        body.clone()
+    };
+
+    info!(
+        room = %room_bare,
+        from = %sender_nick,
+        body_len = dispatch_body.len(),
+        "XMPP MUC message received"
+    );
+
+    let conversation_id = room_bare.to_string();
+
+    // Bang commands fire only on addressed messages. The mention parser has
+    // already stripped any "Sid:" prefix, so `dispatch_body` starts with `!`
+    // iff the user typed e.g. "Sid: !new". Bang commands are deliberately
+    // ALSO accepted on unaddressed bodies in non-mention_only rooms — if a
+    // room is configured to respond to everything, every command is fair
+    // game. Reply goes back as groupchat so the room sees the result.
+    let trimmed = dispatch_body.trim();
+    if trimmed.starts_with('!') {
+        let reply_text = handle_command(&conversation_id, trimmed, dispatcher).await;
+        send_groupchat_reply(client, &room_bare, &reply_text).await?;
+        return Ok(());
+    }
+
+    let turn_req = TurnRequest {
+        surface_id: "xmpp".into(),
+        conversation_id,
+        message_text: dispatch_body,
+    };
+    let mut rx = dispatcher.dispatch(turn_req).await;
+
+    // Same collect-everything-into-one-stanza pattern as DMs. Phase 4 will
+    // add streaming corrections; in MUC, XEP-0308 corrections are addressed
+    // to the room and every client in the room sees the in-place updates.
+    let mut full_text = String::new();
+    while let Some(event) = rx.recv().await {
+        match event {
+            TurnEvent::TextChunk(chunk) => full_text.push_str(&chunk),
+            TurnEvent::Complete(text) => {
+                full_text = text;
+                break;
+            }
+            TurnEvent::Error(e) => {
+                full_text = format!("Something went sideways: {e}");
+                break;
+            }
+        }
+    }
+
+    if full_text.is_empty() {
+        warn!(
+            room = %room_bare,
+            from = %sender_nick,
+            "dispatcher produced empty response — sending nothing"
+        );
+        return Ok(());
+    }
+
+    send_groupchat_reply(client, &room_bare, &full_text).await
+}
+
 /// Send a single `<message type="chat">` stanza back to the given bare JID.
 /// Replying to the bare JID (not a specific resource) lets the user's
 /// server pick the best resource to deliver to — handles roaming between
@@ -467,6 +749,58 @@ async fn send_chat_reply(
     Ok(())
 }
 
+/// Send a single `<message type="groupchat">` stanza to a MUC room. The
+/// destination is the bare room JID — the server fans the message out to
+/// every occupant including the sender (which is what the loop trap drop
+/// in [`handle_groupchat_message`] is there to handle).
+async fn send_groupchat_reply(
+    client: &mut Client,
+    room: &BareJid,
+    body: &str,
+) -> Result<(), tokio_xmpp::Error> {
+    let to_jid = Jid::from(room.clone());
+    let mut reply = Message::new(Some(to_jid));
+    reply.type_ = MessageType::Groupchat;
+    reply.bodies.insert(Lang(String::new()), body.to_string());
+    client.send_stanza(reply.into()).await?;
+    Ok(())
+}
+
+/// Join every configured MUC room. Sends a presence stanza addressed to
+/// `room@host/nick` with a `<x xmlns="http://jabber.org/protocol/muc"/>`
+/// payload requesting zero history stanzas — bots have no use for the
+/// scrollback and processing it on every join would be a token sink.
+///
+/// Errors on the first failed join short-circuit the function. The caller
+/// (`run_session`) returns the error and `serve()`'s reconnect-with-backoff
+/// loop handles the retry.
+async fn join_muc_rooms(
+    client: &mut Client,
+    config: &XmppConfig,
+) -> Result<(), tokio_xmpp::Error> {
+    for room in &config.muc_rooms {
+        let occupant_str = format!("{}/{}", room.jid, room.nick);
+        let occupant_jid = match Jid::from_str(&occupant_str) {
+            Ok(j) => j,
+            Err(e) => {
+                error!(
+                    room = %room.jid,
+                    nick = %room.nick,
+                    %e,
+                    "failed to construct MUC occupant JID — skipping room"
+                );
+                continue;
+            }
+        };
+        let join = Presence::new(PresenceType::None)
+            .with_to(occupant_jid)
+            .with_payload(Muc::new().with_history(History::new().with_maxstanzas(0)));
+        client.send_stanza(join.into()).await?;
+        info!(room = %room.jid, nick = %room.nick, "MUC join sent");
+    }
+    Ok(())
+}
+
 /// Extract the command token from a bang command body. Takes the first
 /// whitespace-separated token and strips any trailing `@suffix` (some MUC
 /// clients append the bot nick — `!new@Sid`). Returns `""` for empty input.
@@ -476,26 +810,30 @@ fn extract_command_name(text: &str) -> &str {
     cmd.split('@').next().unwrap_or(cmd)
 }
 
-/// Parse and handle slash commands. Returns the reply text to send back.
-/// Unrecognized `/commands` get a deflection reply rather than being
+/// Parse and handle bang commands. Returns the reply text to send back.
+/// Unrecognized `!commands` get a deflection reply rather than being
 /// forwarded to the dispatcher — same reason as telegram, prevents Claude
 /// Code skill leakage from typos.
+///
+/// `conversation_id` is the dispatcher session key — for DMs that's the
+/// sender's bare JID; for MUC that's the room's bare JID. The command
+/// applies to the right session because the routing key is the right
+/// thing.
 async fn handle_command(
-    sender: &BareJid,
+    conversation_id: &str,
     text: &str,
     dispatcher: &Dispatcher,
 ) -> String {
     let cmd = extract_command_name(text);
-    let conversation_id = sender.to_string();
 
     match cmd {
         "!new" => {
             let store = dispatcher.store().await;
             let had_session = store
-                .delete_session("xmpp", &conversation_id)
+                .delete_session("xmpp", conversation_id)
                 .unwrap_or(false);
             drop(store);
-            info!(from = %sender, "xmpp !new — session reset");
+            info!(conversation_id, "xmpp !new — session reset");
             if had_session {
                 "Fine. Everything we just talked about? Gone. Hope it wasn't important."
                     .to_string()
@@ -506,7 +844,7 @@ async fn handle_command(
         "!status" => {
             let store = dispatcher.store().await;
             let session = store
-                .lookup_session("xmpp", &conversation_id)
+                .lookup_session("xmpp", conversation_id)
                 .ok()
                 .flatten();
             drop(store);
@@ -692,5 +1030,183 @@ mod tests {
         // matches against `"/new"` etc, so anything else falls through to
         // the deflection branch automatically.
         assert_eq!(extract_command_name("hello"), "hello");
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 5 — MUC support: nick lookup, mention parsing, loop trap
+    // -----------------------------------------------------------------------
+
+    fn config_with_room(room: &str, nick: &str) -> XmppConfig {
+        XmppConfig {
+            jid: BareJid::from_str("sid@example.org").unwrap(),
+            password: "x".into(),
+            server: "127.0.0.1".into(),
+            port: 5222,
+            allowed_jids: HashSet::new(),
+            muc_rooms: vec![MucRoom {
+                jid: BareJid::from_str(room).unwrap(),
+                nick: nick.to_string(),
+            }],
+            mention_only: true,
+            stream_mode: StreamMode::SingleMessage,
+        }
+    }
+
+    #[test]
+    fn nick_for_room_hits_configured_room() {
+        let cfg = config_with_room("xojabo@muc.example.org", "Sid");
+        let room = BareJid::from_str("xojabo@muc.example.org").unwrap();
+        assert_eq!(nick_for_room(&cfg, &room), Some("Sid"));
+    }
+
+    #[test]
+    fn nick_for_room_misses_unknown_room() {
+        let cfg = config_with_room("xojabo@muc.example.org", "Sid");
+        let other = BareJid::from_str("lounge@muc.example.org").unwrap();
+        assert_eq!(nick_for_room(&cfg, &other), None);
+    }
+
+    #[test]
+    fn parse_mention_strips_colon_prefix() {
+        assert_eq!(
+            parse_mention("Sid: hello there", "Sid"),
+            Addressing::Addressed("hello there".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_mention_strips_comma_prefix() {
+        assert_eq!(
+            parse_mention("Sid, hello there", "Sid"),
+            Addressing::Addressed("hello there".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_mention_strips_space_prefix() {
+        assert_eq!(
+            parse_mention("Sid hello there", "Sid"),
+            Addressing::Addressed("hello there".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_mention_bare_nick_is_ping() {
+        assert_eq!(
+            parse_mention("Sid", "Sid"),
+            Addressing::Addressed(String::new())
+        );
+        assert_eq!(
+            parse_mention("@Sid", "Sid"),
+            Addressing::Addressed(String::new())
+        );
+    }
+
+    #[test]
+    fn parse_mention_at_prefix_strips() {
+        assert_eq!(
+            parse_mention("@Sid: hello", "Sid"),
+            Addressing::Addressed("hello".to_string())
+        );
+        assert_eq!(
+            parse_mention("@Sid hello", "Sid"),
+            Addressing::Addressed("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_mention_case_insensitive() {
+        assert_eq!(
+            parse_mention("sid: hi", "Sid"),
+            Addressing::Addressed("hi".to_string())
+        );
+        assert_eq!(
+            parse_mention("SID: hi", "Sid"),
+            Addressing::Addressed("hi".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_mention_leading_whitespace_ignored() {
+        assert_eq!(
+            parse_mention("  Sid: hi", "Sid"),
+            Addressing::Addressed("hi".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_mention_inline_at_reference_is_mentioned() {
+        // @-mention not at the start, body unchanged.
+        assert_eq!(
+            parse_mention("hey @Sid look at this", "Sid"),
+            Addressing::Mentioned
+        );
+    }
+
+    #[test]
+    fn parse_mention_inline_at_reference_at_end() {
+        assert_eq!(
+            parse_mention("look at this @Sid", "Sid"),
+            Addressing::Mentioned
+        );
+        assert_eq!(
+            parse_mention("look at this @Sid.", "Sid"),
+            Addressing::Mentioned
+        );
+    }
+
+    #[test]
+    fn parse_mention_no_address_no_mention() {
+        assert_eq!(
+            parse_mention("hello world", "Sid"),
+            Addressing::None
+        );
+    }
+
+    #[test]
+    fn parse_mention_substring_is_not_a_match() {
+        // Sidney starts with "Sid" but is not "Sid"+separator.
+        assert_eq!(
+            parse_mention("Sidney is here", "Sid"),
+            Addressing::None
+        );
+        // "@Sidney" similarly is not "@Sid"+separator/end.
+        assert_eq!(
+            parse_mention("hey @Sidney whatup", "Sid"),
+            Addressing::None
+        );
+    }
+
+    #[test]
+    fn parse_mention_xojabo_fixture() {
+        // The canonical false-positive case from tasks.md 8.3: John types
+        // "xojabo" in the xojabo room constantly. The bot is named "Sid".
+        // The bot must NOT respond to John. If this test ever fails, the
+        // mention parser is broken and the next deploy will spam the room.
+        assert_eq!(parse_mention("xojabo", "Sid"), Addressing::None);
+        assert_eq!(parse_mention("XOJABO", "Sid"), Addressing::None);
+        assert_eq!(parse_mention("xojabo!", "Sid"), Addressing::None);
+        assert_eq!(parse_mention("xojabo xojabo xojabo", "Sid"), Addressing::None);
+    }
+
+    #[test]
+    fn parse_mention_command_addressed_in_muc() {
+        // The intended pattern for MUC commands: address the bot, then
+        // include the bang command in the body. Mention parser strips the
+        // prefix and the body becomes "!new" — handle_command then fires.
+        assert_eq!(
+            parse_mention("Sid: !new", "Sid"),
+            Addressing::Addressed("!new".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_mention_multiline_body() {
+        // Multi-line addresses: first line is the address, the rest of the
+        // body is the actual message. Should still be a clean strip.
+        assert_eq!(
+            parse_mention("Sid: hello\nhow are you", "Sid"),
+            Addressing::Addressed("hello\nhow are you".to_string())
+        );
     }
 }

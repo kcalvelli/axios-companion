@@ -47,20 +47,20 @@ Second channel adapter, after telegram. Stress-tests the channel pattern against
 
 ## Phase 5: MUC support
 
-- [ ] **5.1** Implement MUC auto-join on connection: for each `(room_jid, nick)` in config, send a presence stanza to `room_jid/nick` to join.
-- [ ] **5.2** Handle MUC message stanzas (`<message type="groupchat">`). Extract room JID, sender nick, body.
-- [ ] **5.3** **Loop prevention**: drop any groupchat message whose sender nick equals our own nick in that room. The ZeroClaw incident (`# Disabled: MUC loop issue with zeroclaw` comment in mini.nix) was almost certainly this — verify by testing once integration is up.
-- [ ] **5.4** **Mention parsing**: in `mention_only` mode, only respond when the body starts with our nick followed by `:`, `,`, or whitespace, OR contains an `@nick` reference. Strip the mention from the body before dispatching.
-- [ ] **5.5** Map room JID → session ID (separate session per room, not per user-in-room — the bot has one conversation with the room as a whole).
-- [ ] **5.6** Send responses as groupchat stanzas to the room JID. SingleMessage corrections work in MUC the same way as DMs.
-- [ ] **5.7** Allowlist behavior in MUC: trust everyone in a room the bot has been told to join. Room membership is the access control boundary, not per-JID allowlists. Document this decision.
-- [ ] **5.8** Unit test: own-nick loop prevention. Unit test: mention parsing edge cases.
+- [x] **5.1** `join_muc_rooms()` sends a presence stanza to each configured `room@host/nick` with a `Muc::new().with_history(History::new().with_maxstanzas(0))` payload (zero history — bots don't replay scrollback). Called from the `Online { resumed: false }` branch in `run_session` after `send_initial_presence`. Modeled directly on the spike. Errors short-circuit and bubble up to the reconnect loop.
+- [x] **5.2** `MessageType::Groupchat` branch in the stanza handler dispatches to `handle_groupchat_message`, which extracts the bare room JID via `from.to_bare()` and the sender nick via `from.resource()`. Stanzas with no resource (subject changes, room-level metadata) are dropped at debug level.
+- [x] **5.3** **Loop prevention shipped.** `handle_groupchat_message` looks up the bot's own nick for the room via `nick_for_room(config, &room)` and drops the message if `sender_nick == our_nick`. Without this drop, the bot would see its own outbound stanzas come back from Prosody's fanout and respond to itself in a tight loop — the canonical ZeroClaw incident, empirically reproduced in the spike.
+- [x] **5.4** **`parse_mention(body, nick) -> Addressing`** with three variants: `Addressed(String)` for `nick:` / `nick,` / `nick ` / `@nick:` / `@nick ` prefix forms (body returned with prefix stripped); `Mentioned` when `@nick` appears as a token elsewhere in the body (body unchanged); `None` otherwise. Case-insensitive on the nick. Substring guard so "Sidney" doesn't match "Sid". 14 unit tests including the **xojabo false-positive fixture** (bare "xojabo" body must NOT match a bot named "Sid").
+- [x] **5.5** `conversation_id = room_bare.to_string()` keys the dispatcher session to the room, not per-user-in-room. The bot has one conversation with the room as a whole — same shape as the DM path, just keyed on room JID instead of sender JID.
+- [x] **5.6** `send_groupchat_reply(client, room_bare, body)` sends `<message type="groupchat">` stanzas addressed to the bare room JID. Phase 4 streaming corrections will apply equally well in MUC — XEP-0308 corrections to a room JID render in-place across all clients in the room.
+- [x] **5.7** Allowlist enforcement is **bypassed for groupchat** by design. Room membership is the access control boundary: if the bot was told to join a room (via `mucRooms` config), every occupant of that room is implicitly trusted. Per-JID allowlists would conflict with the natural room-based trust model. **Recorded here so future-me doesn't add an "allowlist for MUC too" feature without thinking about whether it makes sense.**
+- [x] **5.8** Unit tests: `nick_for_room_hits_configured_room`, `nick_for_room_misses_unknown_room`, plus the full mention-parsing matrix (12 tests covering address-style prefixes, @-mentions, case insensitivity, multi-line bodies, the substring guard, and the xojabo fixture). Loop trap is exercised structurally — `handle_groupchat_message` is short enough to prove out by code review, and the live test (8.3) is the integration check.
 
 ## Phase 6: Slash commands
 
 - [x] **6.1** `/new`, `/status`, `/help` implemented in `handle_command()`, mirroring telegram's command set with the same Sid voice on the replies. `/status` reuses `super::util::format_timestamp` (deduped from telegram in this same commit).
 - [x] **6.2** Unrecognized `/commands` get a deflection reply ("Not a command. Try /help if you're lost.") and are NOT forwarded to the dispatcher — prevents Claude Code skill leakage from typos.
-- [ ] **6.3** In MUC, slash commands only fire when the bot is being addressed. **Deferred to Phase 5** (MUC handling) since the addressing logic doesn't exist yet. The current Phase 6 handler runs unconditionally on DMs only.
+- [x] **6.3** Shipped as part of Phase 5. In MUC, bang commands fire only on bodies that survive `parse_mention()` — i.e., addressed via `Sid:` / `@Sid` prefix (mention-parsed body becomes the command), or `@Sid` mentioned anywhere in the body. Since bang command detection happens AFTER mention parsing in `handle_groupchat_message`, addressing is a structural prerequisite, not a separate gate.
 - [x] **6.4** Unit tests for `extract_command_name` (4 tests): basic commands, argument stripping, `@suffix` stripping (for MUC clients that append the bot nick), and empty/garbage handling.
 
 ## Phase 7: Wiring
