@@ -17,11 +17,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use tokio::sync::Notify;
+use tokio::sync::{mpsc, Notify};
 use tokio_xmpp::connect::DnsConfig;
 use tokio_xmpp::jid::{BareJid, Jid};
 use tokio_xmpp::xmlstream::Timeouts;
-use tokio_xmpp::{Client, Event};
+use tokio_xmpp::{Client, Event, Stanza};
 use tracing::{debug, error, info, warn};
 use xmpp_parsers::message::{Lang, Message, MessageType};
 use xmpp_parsers::muc::muc::{History, Muc};
@@ -418,70 +418,112 @@ async fn run_session(
         Timeouts::default(),
     );
 
-    while let Some(event) = client.next().await {
-        match event {
-            Event::Online { bound_jid, resumed } => {
-                if resumed {
-                    info!(%bound_jid, "XMPP stream resumed");
-                } else {
-                    info!(%bound_jid, "XMPP online");
-                    if let Err(e) = send_initial_presence(&mut client).await {
-                        error!(%e, "failed to send initial presence");
-                        return Err(e);
-                    }
-                    if !config.muc_rooms.is_empty() {
-                        if let Err(e) = join_muc_rooms(&mut client, &config).await {
-                            error!(%e, "failed to send MUC joins");
-                            return Err(e);
-                        }
-                    }
+    // Outbound stanza channel. Spawned turn tasks build their reply
+    // stanzas and push them through `out_tx`; the read loop is the only
+    // thing that ever calls `client.send_stanza`. Buffer 64 is plenty —
+    // the channel only fills if the network is wedged, in which case
+    // backpressure on the turn tasks is exactly what we want.
+    //
+    // This is the structural piece that makes Phase 4 streaming possible
+    // without blocking inbound reads. With the old architecture, a long
+    // turn held `&mut client` for its entire duration, so no inbound
+    // stanzas were processed until it finished. With the writer channel,
+    // each turn runs in its own spawned task, the read loop stays
+    // responsive, and the per-(surface, conversation) lock inside
+    // [`Dispatcher`] keeps same-conversation turns from racing.
+    let (out_tx, mut out_rx) = mpsc::channel::<Stanza>(64);
+
+    loop {
+        tokio::select! {
+            // Bias toward draining outbound first. If the read loop and a
+            // turn task are both ready, we'd rather get the response on
+            // the wire promptly than read another inbound stanza first.
+            biased;
+
+            Some(stanza) = out_rx.recv() => {
+                // The unselected `client.next()` future has been dropped
+                // by select!, so `&mut client` is free here. Errors from
+                // send_stanza are fatal to the session — caller will
+                // reconnect via `serve()`'s backoff loop.
+                if let Err(e) = client.send_stanza(stanza).await {
+                    error!(%e, "failed to send outbound XMPP stanza");
+                    return Err(e.into());
                 }
             }
-            Event::Disconnected(err) => {
-                warn!(%err, "XMPP disconnected");
-                return Err(err);
-            }
-            Event::Stanza(stanza) => {
-                if let Ok(message) = Message::try_from(stanza) {
-                    match message.type_ {
-                        MessageType::Chat => {
-                            if let Err(e) = handle_chat_message(
-                                &mut client,
-                                &message,
-                                &config,
-                                &dispatcher,
-                            )
-                            .await
-                            {
-                                warn!(%e, "error handling XMPP chat message");
+
+            event_opt = client.next() => {
+                let event = match event_opt {
+                    Some(e) => e,
+                    None => {
+                        // Stream ended without an explicit Disconnected
+                        // event. Treat as a clean shutdown — caller will
+                        // reconnect.
+                        return Ok(());
+                    }
+                };
+                match event {
+                    Event::Online { bound_jid, resumed } => {
+                        if resumed {
+                            info!(%bound_jid, "XMPP stream resumed");
+                        } else {
+                            info!(%bound_jid, "XMPP online");
+                            // Initial presence and MUC joins are sent
+                            // inline rather than through the channel.
+                            // We're already in the read loop with `&mut
+                            // client`, nothing else competes for it at
+                            // this instant, and these are bounded
+                            // setup-time operations — no reason to
+                            // round-trip them through the writer queue.
+                            if let Err(e) = send_initial_presence(&mut client).await {
+                                error!(%e, "failed to send initial presence");
+                                return Err(e);
+                            }
+                            if !config.muc_rooms.is_empty() {
+                                if let Err(e) = join_muc_rooms(&mut client, &config).await {
+                                    error!(%e, "failed to send MUC joins");
+                                    return Err(e);
+                                }
                             }
                         }
-                        MessageType::Groupchat => {
-                            if let Err(e) = handle_groupchat_message(
-                                &mut client,
-                                &message,
-                                &config,
-                                &dispatcher,
-                            )
-                            .await
-                            {
-                                warn!(%e, "error handling XMPP groupchat message");
+                    }
+                    Event::Disconnected(err) => {
+                        warn!(%err, "XMPP disconnected");
+                        return Err(err);
+                    }
+                    Event::Stanza(stanza) => {
+                        // Spawn the turn handler so the read loop can
+                        // get back to selecting immediately. The handler
+                        // pushes its reply stanzas into `out_tx`; the
+                        // read loop drains them on the next iteration.
+                        let cfg = config.clone();
+                        let disp = dispatcher.clone();
+                        let tx = out_tx.clone();
+                        tokio::spawn(async move {
+                            let message = match Message::try_from(stanza) {
+                                Ok(m) => m,
+                                Err(_) => return,
+                            };
+                            match message.type_ {
+                                MessageType::Chat => {
+                                    handle_chat_message(&message, &cfg, &disp, &tx).await;
+                                }
+                                MessageType::Groupchat => {
+                                    handle_groupchat_message(&message, &cfg, &disp, &tx).await;
+                                }
+                                _ => {
+                                    debug!(
+                                        ty = ?message.type_,
+                                        from = ?message.from,
+                                        "ignoring message of unhandled type"
+                                    );
+                                }
                             }
-                        }
-                        _ => {
-                            debug!(
-                                ty = ?message.type_,
-                                from = ?message.from,
-                                "ignoring message of unhandled type"
-                            );
-                        }
+                        });
                     }
                 }
             }
         }
     }
-
-    Ok(())
 }
 
 /// Returns true if the sender is on the allowlist. An empty allowlist
@@ -495,21 +537,23 @@ fn is_allowed(config: &XmppConfig, sender: &BareJid) -> bool {
 /// and send it back as a single chat stanza. Streaming with XEP-0308
 /// corrections is Phase 4's job.
 ///
-/// Errors are propagated up so the caller can log them; the session loop
-/// continues regardless.
+/// Runs inside a spawned task per inbound message. Outbound replies go
+/// through `out_tx` to the read loop, which owns `&mut Client` and is the
+/// only thing that ever calls `send_stanza`. Errors are logged here and
+/// not propagated — the spawned task simply ends.
 async fn handle_chat_message(
-    client: &mut Client,
     message: &Message,
     config: &XmppConfig,
     dispatcher: &Dispatcher,
-) -> Result<(), tokio_xmpp::Error> {
+    out_tx: &mpsc::Sender<Stanza>,
+) {
     // Extract sender bare JID — drop messages with no `from` (server pings,
     // some chat-state notifications) or those that don't parse cleanly.
     let from_jid = match message.from.as_ref() {
         Some(j) => j,
         None => {
             debug!("dropping chat message with no `from`");
-            return Ok(());
+            return;
         }
     };
     let sender_bare = from_jid.to_bare();
@@ -521,14 +565,14 @@ async fn handle_chat_message(
         Some(b) => b.clone(),
         None => {
             debug!(from = %sender_bare, "dropping chat message with no body");
-            return Ok(());
+            return;
         }
     };
 
     // Allowlist enforcement.
     if !is_allowed(config, &sender_bare) {
         debug!(from = %sender_bare, "dropping chat message from non-allowlisted JID");
-        return Ok(());
+        return;
     }
 
     info!(
@@ -546,8 +590,10 @@ async fn handle_chat_message(
     let trimmed = body.trim();
     if trimmed.starts_with('!') {
         let reply_text = handle_command(&conversation_id, trimmed, dispatcher).await;
-        send_chat_reply(client, &sender_bare, &reply_text).await?;
-        return Ok(());
+        if let Err(e) = send_chat_reply(out_tx, &sender_bare, &reply_text).await {
+            warn!(%e, from = %sender_bare, "failed to enqueue chat reply (channel closed?)");
+        }
+        return;
     }
 
     // Build the turn request and dispatch.
@@ -577,10 +623,12 @@ async fn handle_chat_message(
 
     if full_text.is_empty() {
         warn!(from = %sender_bare, "dispatcher produced empty response — sending nothing");
-        return Ok(());
+        return;
     }
 
-    send_chat_reply(client, &sender_bare, &full_text).await
+    if let Err(e) = send_chat_reply(out_tx, &sender_bare, &full_text).await {
+        warn!(%e, from = %sender_bare, "failed to enqueue chat reply (channel closed?)");
+    }
 }
 
 /// Handle one inbound `<message type="groupchat">`. Phase 5.
@@ -604,16 +652,16 @@ async fn handle_chat_message(
 ///    Allowlist is BYPASSED for groupchat: room membership is the access
 ///    control boundary (per task 5.7).
 async fn handle_groupchat_message(
-    client: &mut Client,
     message: &Message,
     config: &XmppConfig,
     dispatcher: &Dispatcher,
-) -> Result<(), tokio_xmpp::Error> {
+    out_tx: &mpsc::Sender<Stanza>,
+) {
     let from_jid = match message.from.as_ref() {
         Some(j) => j,
         None => {
             debug!("dropping groupchat message with no `from`");
-            return Ok(());
+            return;
         }
     };
     let room_bare = from_jid.to_bare();
@@ -623,7 +671,7 @@ async fn handle_groupchat_message(
             // No resource = sent by the room itself (subject changes,
             // history end markers, etc). Nothing to respond to.
             debug!(room = %room_bare, "dropping groupchat with no resource (room-level stanza)");
-            return Ok(());
+            return;
         }
     };
 
@@ -636,7 +684,7 @@ async fn handle_groupchat_message(
                 room = %room_bare,
                 "received groupchat from a room not in muc_rooms config — dropping"
             );
-            return Ok(());
+            return;
         }
     };
 
@@ -650,7 +698,7 @@ async fn handle_groupchat_message(
             nick = %sender_nick,
             "dropping own groupchat echo (loop trap)"
         );
-        return Ok(());
+        return;
     }
 
     // Body extraction. Empty body = chat state notification, drop.
@@ -662,7 +710,7 @@ async fn handle_groupchat_message(
                 from = %sender_nick,
                 "dropping groupchat with no body"
             );
-            return Ok(());
+            return;
         }
     };
 
@@ -678,7 +726,7 @@ async fn handle_groupchat_message(
                     from = %sender_nick,
                     "dropping groupchat: not addressed and mention_only is on"
                 );
-                return Ok(());
+                return;
             }
         }
     } else {
@@ -703,8 +751,10 @@ async fn handle_groupchat_message(
     let trimmed = dispatch_body.trim();
     if trimmed.starts_with('!') {
         let reply_text = handle_command(&conversation_id, trimmed, dispatcher).await;
-        send_groupchat_reply(client, &room_bare, &reply_text).await?;
-        return Ok(());
+        if let Err(e) = send_groupchat_reply(out_tx, &room_bare, &reply_text).await {
+            warn!(%e, room = %room_bare, "failed to enqueue groupchat reply (channel closed?)");
+        }
+        return;
     }
 
     let turn_req = TurnRequest {
@@ -738,44 +788,49 @@ async fn handle_groupchat_message(
             from = %sender_nick,
             "dispatcher produced empty response — sending nothing"
         );
-        return Ok(());
+        return;
     }
 
-    send_groupchat_reply(client, &room_bare, &full_text).await
+    if let Err(e) = send_groupchat_reply(out_tx, &room_bare, &full_text).await {
+        warn!(%e, room = %room_bare, "failed to enqueue groupchat reply (channel closed?)");
+    }
 }
 
-/// Send a single `<message type="chat">` stanza back to the given bare JID.
-/// Replying to the bare JID (not a specific resource) lets the user's
-/// server pick the best resource to deliver to — handles roaming between
-/// Conversations on phone and Gajim on desktop.
+/// Build a `<message type="chat">` stanza addressed to `to` and push it
+/// onto the writer channel. Replying to the bare JID (not a specific
+/// resource) lets the user's server pick the best resource to deliver to
+/// — handles roaming between Conversations on phone and Gajim on desktop.
+///
+/// Returns `Err` only if the writer channel has been closed, which means
+/// the read loop has already exited and this reply will not make it to
+/// the wire. Callers log and move on.
 async fn send_chat_reply(
-    client: &mut Client,
+    out_tx: &mpsc::Sender<Stanza>,
     to: &BareJid,
     body: &str,
-) -> Result<(), tokio_xmpp::Error> {
+) -> Result<(), mpsc::error::SendError<Stanza>> {
     let to_jid = Jid::from(to.clone());
     let mut reply = Message::new(Some(to_jid));
     reply.type_ = MessageType::Chat;
     reply.bodies.insert(Lang(String::new()), body.to_string());
-    client.send_stanza(reply.into()).await?;
-    Ok(())
+    out_tx.send(reply.into()).await
 }
 
-/// Send a single `<message type="groupchat">` stanza to a MUC room. The
-/// destination is the bare room JID — the server fans the message out to
-/// every occupant including the sender (which is what the loop trap drop
-/// in [`handle_groupchat_message`] is there to handle).
+/// Build a `<message type="groupchat">` stanza addressed to a MUC room
+/// and push it onto the writer channel. The destination is the bare room
+/// JID — the server fans the message out to every occupant including the
+/// sender (which is what the loop trap drop in [`handle_groupchat_message`]
+/// is there to handle).
 async fn send_groupchat_reply(
-    client: &mut Client,
+    out_tx: &mpsc::Sender<Stanza>,
     room: &BareJid,
     body: &str,
-) -> Result<(), tokio_xmpp::Error> {
+) -> Result<(), mpsc::error::SendError<Stanza>> {
     let to_jid = Jid::from(room.clone());
     let mut reply = Message::new(Some(to_jid));
     reply.type_ = MessageType::Groupchat;
     reply.bodies.insert(Lang(String::new()), body.to_string());
-    client.send_stanza(reply.into()).await?;
-    Ok(())
+    out_tx.send(reply.into()).await
 }
 
 /// Join every configured MUC room. Sends a presence stanza addressed to
