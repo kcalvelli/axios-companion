@@ -23,10 +23,10 @@ use tokio_xmpp::jid::{BareJid, Jid};
 use tokio_xmpp::xmlstream::Timeouts;
 use tokio_xmpp::{Client, Event};
 use tracing::{debug, error, info, warn};
-use xmpp_parsers::message::Lang;
+use xmpp_parsers::message::{Lang, Message, MessageType};
 use xmpp_parsers::presence::{Presence, Show as PresenceShow, Type as PresenceType};
 
-use crate::dispatcher::Dispatcher;
+use crate::dispatcher::{Dispatcher, TurnEvent, TurnRequest};
 
 use connector::{build_tls_config, Connector};
 
@@ -217,7 +217,7 @@ fn parse_muc_rooms(raw: &str) -> Vec<MucRoom> {
 /// error the loop reconnects with exponential backoff so the bot survives
 /// Prosody restarts during nixos-rebuild.
 pub async fn serve(
-    _dispatcher: Arc<Dispatcher>,
+    dispatcher: Arc<Dispatcher>,
     config: XmppConfig,
     shutdown: Arc<Notify>,
 ) {
@@ -239,7 +239,8 @@ pub async fn serve(
 
     loop {
         let cfg = config.clone();
-        let session = run_session(cfg);
+        let dispatcher = dispatcher.clone();
+        let session = run_session(cfg, dispatcher);
 
         tokio::select! {
             biased;
@@ -275,7 +276,10 @@ pub async fn serve(
 /// One connect → auth → presence → event-loop cycle. Returns `Ok(())` on
 /// graceful disconnect, `Err(_)` on any failure (caller decides whether to
 /// reconnect).
-async fn run_session(config: Arc<XmppConfig>) -> Result<(), tokio_xmpp::Error> {
+async fn run_session(
+    config: Arc<XmppConfig>,
+    dispatcher: Arc<Dispatcher>,
+) -> Result<(), tokio_xmpp::Error> {
     let connector = Connector {
         dns_config: DnsConfig::NoSrv {
             host: config.server.clone(),
@@ -319,13 +323,213 @@ async fn run_session(config: Arc<XmppConfig>) -> Result<(), tokio_xmpp::Error> {
                 return Err(err);
             }
             Event::Stanza(stanza) => {
-                // TODO(channel-xmpp Phase 3): dispatch via _dispatcher
-                debug!(?stanza, "XMPP stanza received (handler not yet wired)");
+                // Phase 3: handle DM `<message type="chat">` only.
+                // Phase 5 will add the groupchat branch (with the loop trap
+                // mitigation — drop messages whose nick equals our own).
+                if let Ok(message) = Message::try_from(stanza) {
+                    if message.type_ == MessageType::Chat {
+                        if let Err(e) = handle_chat_message(
+                            &mut client,
+                            &message,
+                            &config,
+                            &dispatcher,
+                        )
+                        .await
+                        {
+                            warn!(%e, "error handling XMPP chat message");
+                        }
+                    } else {
+                        debug!(
+                            ty = ?message.type_,
+                            from = ?message.from,
+                            "ignoring non-chat message (Phase 3 handles DMs only)"
+                        );
+                    }
+                }
             }
         }
     }
 
     Ok(())
+}
+
+/// Returns true if the sender is on the allowlist. An empty allowlist
+/// means nobody gets through — deny by default, mirroring telegram.
+fn is_allowed(config: &XmppConfig, sender: &BareJid) -> bool {
+    config.allowed_jids.contains(sender)
+}
+
+/// Handle one inbound `<message type="chat">`. Phase 3 does the simplest
+/// possible thing: collect the dispatcher response into one final string
+/// and send it back as a single chat stanza. Streaming with XEP-0308
+/// corrections is Phase 4's job.
+///
+/// Errors are propagated up so the caller can log them; the session loop
+/// continues regardless.
+async fn handle_chat_message(
+    client: &mut Client,
+    message: &Message,
+    config: &XmppConfig,
+    dispatcher: &Dispatcher,
+) -> Result<(), tokio_xmpp::Error> {
+    // Extract sender bare JID — drop messages with no `from` (server pings,
+    // some chat-state notifications) or those that don't parse cleanly.
+    let from_jid = match message.from.as_ref() {
+        Some(j) => j,
+        None => {
+            debug!("dropping chat message with no `from`");
+            return Ok(());
+        }
+    };
+    let sender_bare = from_jid.to_bare();
+
+    // Extract body. A message with no body is typically a chat-state
+    // notification (composing/active/paused) and we ignore those — we don't
+    // need to react to typing indicators.
+    let body = match message.bodies.values().next() {
+        Some(b) => b.clone(),
+        None => {
+            debug!(from = %sender_bare, "dropping chat message with no body");
+            return Ok(());
+        }
+    };
+
+    // Allowlist enforcement.
+    if !is_allowed(config, &sender_bare) {
+        debug!(from = %sender_bare, "dropping chat message from non-allowlisted JID");
+        return Ok(());
+    }
+
+    info!(
+        from = %sender_bare,
+        body_len = body.len(),
+        "XMPP DM received"
+    );
+
+    // Slash commands short-circuit the dispatcher.
+    let trimmed = body.trim();
+    if trimmed.starts_with('/') {
+        let reply_text = handle_command(&sender_bare, trimmed, dispatcher).await;
+        send_chat_reply(client, &sender_bare, &reply_text).await?;
+        return Ok(());
+    }
+
+    // Build the turn request and dispatch.
+    let turn_req = TurnRequest {
+        surface_id: "xmpp".into(),
+        conversation_id: sender_bare.to_string(),
+        message_text: body,
+    };
+    let mut rx = dispatcher.dispatch(turn_req).await;
+
+    // Collect everything into one final response. Phase 4 will replace this
+    // with streaming corrections (XEP-0308); for now, one stanza per turn.
+    let mut full_text = String::new();
+    while let Some(event) = rx.recv().await {
+        match event {
+            TurnEvent::TextChunk(chunk) => full_text.push_str(&chunk),
+            TurnEvent::Complete(text) => {
+                full_text = text;
+                break;
+            }
+            TurnEvent::Error(e) => {
+                full_text = format!("Something went sideways: {e}");
+                break;
+            }
+        }
+    }
+
+    if full_text.is_empty() {
+        warn!(from = %sender_bare, "dispatcher produced empty response — sending nothing");
+        return Ok(());
+    }
+
+    send_chat_reply(client, &sender_bare, &full_text).await
+}
+
+/// Send a single `<message type="chat">` stanza back to the given bare JID.
+/// Replying to the bare JID (not a specific resource) lets the user's
+/// server pick the best resource to deliver to — handles roaming between
+/// Conversations on phone and Gajim on desktop.
+async fn send_chat_reply(
+    client: &mut Client,
+    to: &BareJid,
+    body: &str,
+) -> Result<(), tokio_xmpp::Error> {
+    let to_jid = Jid::from(to.clone());
+    let mut reply = Message::new(Some(to_jid));
+    reply.type_ = MessageType::Chat;
+    reply.bodies.insert(Lang(String::new()), body.to_string());
+    client.send_stanza(reply.into()).await?;
+    Ok(())
+}
+
+/// Extract the command token from a slash command body. Takes the first
+/// whitespace-separated token and strips any trailing `@suffix` (some MUC
+/// clients append the bot nick — `/new@Sid`). Returns `""` for empty input.
+fn extract_command_name(text: &str) -> &str {
+    let cmd = text.split_whitespace().next().unwrap_or("");
+    cmd.split('@').next().unwrap_or(cmd)
+}
+
+/// Parse and handle slash commands. Returns the reply text to send back.
+/// Unrecognized `/commands` get a deflection reply rather than being
+/// forwarded to the dispatcher — same reason as telegram, prevents Claude
+/// Code skill leakage from typos.
+async fn handle_command(
+    sender: &BareJid,
+    text: &str,
+    dispatcher: &Dispatcher,
+) -> String {
+    let cmd = extract_command_name(text);
+    let conversation_id = sender.to_string();
+
+    match cmd {
+        "/new" => {
+            let store = dispatcher.store().await;
+            let had_session = store
+                .delete_session("xmpp", &conversation_id)
+                .unwrap_or(false);
+            drop(store);
+            info!(from = %sender, "xmpp /new — session reset");
+            if had_session {
+                "Fine. Everything we just talked about? Gone. Hope it wasn't important."
+                    .to_string()
+            } else {
+                "There's nothing to forget. We haven't even started yet.".to_string()
+            }
+        }
+        "/status" => {
+            let store = dispatcher.store().await;
+            let session = store
+                .lookup_session("xmpp", &conversation_id)
+                .ok()
+                .flatten();
+            drop(store);
+            match session {
+                Some(s) => {
+                    let claude_id = s
+                        .claude_session_id
+                        .as_deref()
+                        .unwrap_or("(not yet assigned)");
+                    format!(
+                        "Session active\nClaude session: {}\nLast active: {}",
+                        claude_id,
+                        super::util::format_timestamp(s.last_active_at),
+                    )
+                }
+                None => "No active session. Send a message to start one.".to_string(),
+            }
+        }
+        "/help" => "\
+/new — clear session, start fresh\n\
+/status — show current session info\n\
+/help — this message\n\
+\n\
+Everything else goes straight to the companion."
+            .to_string(),
+        _ => "Not a command. Try /help if you're lost.".to_string(),
+    }
 }
 
 /// Send the initial `<presence/>` so the bot shows as available with a Sid
@@ -406,5 +610,83 @@ mod tests {
     #[test]
     fn stream_mode_variants_distinct() {
         assert_ne!(StreamMode::SingleMessage, StreamMode::MultiMessage);
+    }
+
+    fn make_config(allowed: &[&str]) -> XmppConfig {
+        XmppConfig {
+            jid: BareJid::from_str("sid@example.org").unwrap(),
+            password: "x".into(),
+            server: "127.0.0.1".into(),
+            port: 5222,
+            allowed_jids: allowed
+                .iter()
+                .map(|s| BareJid::from_str(s).unwrap())
+                .collect(),
+            muc_rooms: vec![],
+            mention_only: true,
+            stream_mode: StreamMode::SingleMessage,
+        }
+    }
+
+    #[test]
+    fn allowlist_empty_denies_all() {
+        let config = make_config(&[]);
+        let stranger = BareJid::from_str("stranger@example.org").unwrap();
+        assert!(!is_allowed(&config, &stranger));
+    }
+
+    #[test]
+    fn allowlist_permits_listed_jid() {
+        let config = make_config(&["keith@example.org"]);
+        let keith = BareJid::from_str("keith@example.org").unwrap();
+        assert!(is_allowed(&config, &keith));
+    }
+
+    #[test]
+    fn allowlist_denies_unlisted_jid() {
+        let config = make_config(&["keith@example.org"]);
+        let alice = BareJid::from_str("alice@example.org").unwrap();
+        assert!(!is_allowed(&config, &alice));
+    }
+
+    #[test]
+    fn allowlist_does_not_match_resource() {
+        // Resources should already be stripped before is_allowed runs, but
+        // verify that bare-jid equality is what's used (not full-jid string
+        // matching). A typo here would let resource-spoofing past the gate.
+        let config = make_config(&["keith@example.org"]);
+        let keith_phone = BareJid::from_str("keith@example.org").unwrap();
+        assert!(is_allowed(&config, &keith_phone));
+    }
+
+    #[test]
+    fn extract_command_name_basic() {
+        assert_eq!(extract_command_name("/new"), "/new");
+        assert_eq!(extract_command_name("/status"), "/status");
+        assert_eq!(extract_command_name("/help"), "/help");
+    }
+
+    #[test]
+    fn extract_command_name_strips_arguments() {
+        // Telegram users sometimes type "/new keep this part"; the parser
+        // should isolate the command and ignore everything after.
+        assert_eq!(extract_command_name("/new keep this part"), "/new");
+    }
+
+    #[test]
+    fn extract_command_name_strips_at_suffix() {
+        // MUC clients sometimes append the bot's nick: "/new@Sid"
+        assert_eq!(extract_command_name("/new@Sid"), "/new");
+        assert_eq!(extract_command_name("/help@SidBot extra"), "/help");
+    }
+
+    #[test]
+    fn extract_command_name_handles_empty_and_garbage() {
+        assert_eq!(extract_command_name(""), "");
+        assert_eq!(extract_command_name("   "), "");
+        // Non-slash inputs are passed through unchanged — handle_command
+        // matches against `"/new"` etc, so anything else falls through to
+        // the deflection branch automatically.
+        assert_eq!(extract_command_name("hello"), "hello");
     }
 }

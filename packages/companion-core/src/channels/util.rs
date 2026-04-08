@@ -45,6 +45,25 @@ pub fn split_message(text: &str, max_chars: usize) -> Vec<String> {
     chunks
 }
 
+/// Format a unix timestamp as a human-readable "time since" — "just now",
+/// "5m ago", "3h ago", "2d ago". Used by `/status` slash commands across
+/// every channel.
+pub fn format_timestamp(ts: i64) -> String {
+    use std::time::{Duration, UNIX_EPOCH};
+    let dt = UNIX_EPOCH + Duration::from_secs(ts as u64);
+    let elapsed = dt.elapsed().unwrap_or_default();
+    let mins = elapsed.as_secs() / 60;
+    if mins < 1 {
+        "just now".to_string()
+    } else if mins < 60 {
+        format!("{}m ago", mins)
+    } else if mins < 1440 {
+        format!("{}h ago", mins / 60)
+    } else {
+        format!("{}d ago", mins / 1440)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

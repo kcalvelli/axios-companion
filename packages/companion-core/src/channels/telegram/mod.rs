@@ -235,7 +235,7 @@ async fn handle_command(
                     format!(
                         "Session active\nClaude session: {}\nLast active: {}",
                         claude_id,
-                        format_timestamp(s.last_active_at),
+                        super::util::format_timestamp(s.last_active_at),
                     )
                 }
                 None => "No active session. Send a message to start one.".to_string(),
@@ -257,23 +257,6 @@ Everything else goes straight to the companion.";
             let _ = bot.send_message(chat_id, "Not a command. Try /help if you're lost.").await;
             true
         }
-    }
-}
-
-/// Format a unix timestamp for display.
-fn format_timestamp(ts: i64) -> String {
-    use std::time::{Duration, UNIX_EPOCH};
-    let dt = UNIX_EPOCH + Duration::from_secs(ts as u64);
-    let elapsed = dt.elapsed().unwrap_or_default();
-    let mins = elapsed.as_secs() / 60;
-    if mins < 1 {
-        "just now".to_string()
-    } else if mins < 60 {
-        format!("{}m ago", mins)
-    } else if mins < 1440 {
-        format!("{}h ago", mins / 60)
-    } else {
-        format!("{}d ago", mins / 1440)
     }
 }
 

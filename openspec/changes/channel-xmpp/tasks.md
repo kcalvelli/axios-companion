@@ -27,12 +27,12 @@ Second channel adapter, after telegram. Stress-tests the channel pattern against
 
 ## Phase 3: Direct message handling
 
-- [ ] **3.1** Implement message stanza handler: receive `<message type="chat">`, extract sender bare JID + body.
-- [ ] **3.2** Allowlist filter: drop messages from JIDs not in `allowed_jids`. Empty allowlist = nobody (deny by default, matches telegram).
-- [ ] **3.3** Map sender bare JID → session ID via the session store. Reuse the same `delete_session()` path telegram uses for `/new`.
-- [ ] **3.4** Build a `TurnRequest` and dispatch through the shared `Arc<Dispatcher>`.
-- [ ] **3.5** Send the assembled response back as a `<message type="chat">` stanza to the sender's bare JID.
-- [ ] **3.6** Unit test: allowlist enforcement (allowed JID passes, unknown JID drops, empty allowlist drops everyone).
+- [x] **3.1** Message stanza handler in `run_session`: filters `Stanza::Message` with `MessageType::Chat`, extracts `from.to_bare()` for the sender and the first body string. Messages with no body (chat-state notifications) are dropped at debug level.
+- [x] **3.2** Allowlist filter via `is_allowed(&XmppConfig, &BareJid)`. Empty allowlist = deny everyone, matching telegram.
+- [x] **3.3** Sender bare JID is used directly as `conversation_id` (`bare.to_string()`) for the session store — same shape as telegram's `chat_id.to_string()`. Bare JID, not full JID, so the same conversation persists across resource roaming (Conversations on phone vs Gajim on desktop).
+- [x] **3.4** `TurnRequest { surface_id: "xmpp", conversation_id, message_text }` dispatched through the shared `Arc<Dispatcher>`.
+- [x] **3.5** Reply sent as `<message type="chat">` to the sender's bare JID via `send_chat_reply()`. Phase 3 collects the full dispatcher response into one stanza (no streaming yet — Phase 4's job).
+- [x] **3.6** Unit tests for allowlist enforcement: empty-denies-all, permits-listed, denies-unlisted, bare-jid-equality (4 tests, all passing).
 
 ## Phase 4: Streaming, corrections, and chat states
 
@@ -57,10 +57,10 @@ Second channel adapter, after telegram. Stress-tests the channel pattern against
 
 ## Phase 6: Slash commands
 
-- [ ] **6.1** Implement the same command set as telegram: `/new` (delete and recreate session), `/status` (show session info), `/help` (list commands).
-- [ ] **6.2** Catch unrecognized `/commands` in the adapter — do NOT forward them to the dispatcher. Same reason as telegram (prevents Claude Code skill leakage).
-- [ ] **6.3** In MUC, slash commands only fire when the bot is being addressed (same `mention_only` rules). A `/new` floating in the room without addressing the bot does nothing.
-- [ ] **6.4** Unit test: command parsing, unknown command rejection.
+- [x] **6.1** `/new`, `/status`, `/help` implemented in `handle_command()`, mirroring telegram's command set with the same Sid voice on the replies. `/status` reuses `super::util::format_timestamp` (deduped from telegram in this same commit).
+- [x] **6.2** Unrecognized `/commands` get a deflection reply ("Not a command. Try /help if you're lost.") and are NOT forwarded to the dispatcher — prevents Claude Code skill leakage from typos.
+- [ ] **6.3** In MUC, slash commands only fire when the bot is being addressed. **Deferred to Phase 5** (MUC handling) since the addressing logic doesn't exist yet. The current Phase 6 handler runs unconditionally on DMs only.
+- [x] **6.4** Unit tests for `extract_command_name` (4 tests): basic commands, argument stripping, `@suffix` stripping (for MUC clients that append the bot nick), and empty/garbage handling.
 
 ## Phase 7: Wiring
 
