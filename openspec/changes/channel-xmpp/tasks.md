@@ -5,28 +5,25 @@ Second channel adapter, after telegram. Stress-tests the channel pattern against
 ## Phase 1: Dependencies and skeleton
 
 - [x] **1.1** ~~Pick the Rust XMPP stack~~ **DECIDED 2026-04-08**: use `tokio-xmpp` 5.0.0 + `xmpp-parsers` 0.22.0 directly. **Skip** the high-level `xmpp` crate — it's at 0.6.0 (last released July 2024), self-describes as "very much WIP," and its `Event` enum exposes only `ChatMessage`/`RoomMessage`/`RoomJoined`-style variants, with no surface for XEP-0308 corrections or XEP-0085 chat states. We'd be hand-rolling those stanzas via `xmpp-parsers` regardless, so the wrapper provides no value while adding a stale dependency. `xmpp-parsers` confirmed to have `message_correct` (XEP-0308), `chatstates` (XEP-0085), `muc` (XEP-0045), and `message` (RFC 6120) modules.
-- [ ] **1.2** Add `tokio-xmpp = "5"` and `xmpp-parsers = "0.22"` to `packages/companion-core/Cargo.toml`. Use the `starttls` and `aws_lc_rs`/`rustls` features on `tokio-xmpp` to match the existing rustls posture in the workspace. **Do not** add the `xmpp` crate.
-- [ ] **1.3** Update `packages/companion-core/default.nix` if any new native build inputs are needed (likely none — xmpp-rs is pure Rust + rustls).
-- [ ] **1.4** Verify `cargo check` passes with new dependencies.
-- [ ] **1.5** **Reorg into `channels/` namespace** (Option A, decided):
-  - Create `packages/companion-core/src/channels/mod.rs`.
-  - Move `packages/companion-core/src/telegram/` → `packages/companion-core/src/channels/telegram/`.
-  - Create `packages/companion-core/src/channels/util.rs` with `pub fn split_message(text: &str, max_chars: usize) -> Vec<String>` — lift the algorithm from `channels/telegram/mod.rs`, parameterize the cap.
-  - Update `channels/telegram/mod.rs` to call `crate::channels::util::split_message(text, 4096)` and delete its private copy.
-  - Update `main.rs` to declare `mod channels;` instead of `mod telegram;` and update `use` paths.
-  - Run `cargo test -p companion-core` — every existing telegram unit test must still pass with zero edits to test logic. If a test fails, the move broke something; fix before continuing.
-- [ ] **1.6** Create `packages/companion-core/src/channels/xmpp/mod.rs` skeleton with module-level doc comment matching telegram's style. Wire it into `channels/mod.rs`.
-- [ ] **1.7** **Pre-XMPP regression check**: build with the channels reorg but no xmpp logic yet, deploy to a scratch shell or `cargo run` locally, verify telegram still connects and responds. The reorg lands cleanly *before* any xmpp code exists, so a regression here can only be the move itself. Do not start Phase 2 until this is green.
+  - **ADDENDUM 2026-04-08 (Phase 2 spike)**: tokio-xmpp 5.0.0's shipped `StartTlsServerConnector` hardcodes its rustls `ClientConfig` inside `connect/tls_common.rs::establish_tls_connection` with no public override hook for a custom `ServerCertVerifier`. Our chat infra (Prosody behind Tailscale Serve TCP passthrough) presents a self-signed cert, which the upstream connector rejects unconditionally. Resolved by implementing a custom `ServerConnector` that mirrors `StartTlsServerConnector::connect` but slots in our own `Arc<ClientConfig>` at the TLS handshake step. Verified end-to-end via standalone spike at `~/.local/share/axios-companion/workspace/xmpp-spike` (DM connect, presence broadcast, MUC join, groupchat send — all green against mini's Prosody, Keith confirmed visually in his roster + the xojabo room). Production code lives at `packages/companion-core/src/channels/xmpp/connector.rs`. ~80 lines, single file, modeled directly on upstream. The spike crate is preserved for future debugging.
+- [x] **1.2** Add `tokio-xmpp = "5"` and `xmpp-parsers = "0.22"` to `packages/companion-core/Cargo.toml`. Also adds `tokio-rustls = "0.26"` (with `aws_lc_rs` feature) and `sasl = "0.5"` as direct deps because the custom connector needs `TlsConnector` and `ChannelBinding` types. Defaults give rustls + starttls + hickory.
+- [x] **1.3** `packages/companion-core/default.nix` untouched — no native build inputs needed beyond what was already present (verified via sandbox `nix build`).
+- [x] **1.4** `cargo build -p companion-core` green.
+- [x] **1.5** Channels namespace reorg shipped (Option A). `channels/util.rs` with shared `split_message`, telegram moved to `channels/telegram/`, new `channels/xmpp/` directory.
+- [x] **1.6** `channels/xmpp/mod.rs` skeleton landed at Phase 1.6 (then replaced with real config + serve() in Phase 2).
+- [x] **1.7** Pre-XMPP regression check passed: telegram on mini stayed working (`/new`, free-text DM, `/status`, `/help`) after the channels reorg. Verified in session 2026-04-08.
 
 ## Phase 2: Configuration and connection
 
-- [ ] **2.1** Define `XmppConfig` struct in `xmpp/mod.rs`: `jid`, `password`, `server`, `port`, `tls_verify`, `allowed_jids: HashSet<BareJid>`, `muc_rooms: Vec<(BareJid, String)>` (room JID + nick), `mention_only`, `stream_mode`.
-- [ ] **2.2** Implement `XmppConfig::from_env()` mirroring `TelegramConfig::from_env()`. Read from `COMPANION_XMPP_*` env vars. Return `None` when `COMPANION_XMPP_ENABLE != 1`.
-- [ ] **2.3** Read password from `COMPANION_XMPP_PASSWORD_FILE` (agenix-managed file path). Empty file → error → return None.
-- [ ] **2.4** Define `StreamMode` enum identical to telegram's: `SingleMessage` (uses XEP-0308 corrections) and `MultiMessage` (splits).
-- [ ] **2.5** Implement `connect()` — establish XMPP client connection to `server:port`, accept self-signed cert when `tls_verify = false`, authenticate with SASL PLAIN (we're on localhost — PLAIN over TLS-less loopback is fine, but verify the `xmpp` crate's behavior here and document it).
-- [ ] **2.6** Send initial presence (online) on successful connection.
-- [ ] **2.7** Implement reconnect-with-backoff loop for transient failures. The Prosody server restarts during nixos-rebuild — the bot should survive that without a daemon restart.
+- [x] **2.1** `XmppConfig` struct landed in `channels/xmpp/mod.rs`. Fields: `jid: BareJid`, `password`, `server`, `port`, `allowed_jids: HashSet<BareJid>`, `muc_rooms: Vec<MucRoom>` (struct of `BareJid` + `nick`), `mention_only`, `stream_mode`. **Note:** the `tls_verify` field from the original plan was deliberately omitted — see addendum below.
+- [x] **2.2** `XmppConfig::from_env()` reads `COMPANION_XMPP_ENABLE`, `_JID`, `_PASSWORD_FILE`, `_SERVER`, `_PORT`, `_ALLOWED_JIDS`, `_MUC_ROOMS`, `_MENTION_ONLY`, `_STREAM_MODE`. Returns `None` when ENABLE != 1 or any required field is missing/invalid. Logs the failure reason at error level so a misconfigured deploy is loud, not silent. Tests cover the `parse_allowed_jids` and `parse_muc_rooms` helpers.
+- [x] **2.3** Password is read from `COMPANION_XMPP_PASSWORD_FILE` (agenix-managed). Empty file → error → return None. Path read failure → error → return None.
+- [x] **2.4** `StreamMode` enum identical in shape to telegram's: `SingleMessage` (will use XEP-0308 corrections in Phase 4) and `MultiMessage` (will use the shared `split_message` from `channels/util.rs`).
+- [x] **2.5** Connect path lands in `serve()` → `run_session()`. Uses our custom `Connector` (see 1.1 addendum) with `DnsConfig::NoSrv { host, port }` to bypass SRV lookups. Authenticates via tokio-xmpp's built-in SASL PLAIN. The custom connector handles TCP, plaintext stream open, `<starttls/>` negotiation, the TLS handshake against our `ClientConfig`, and the post-TLS stream re-open. Spike (1.1 addendum) verified the full negotiation against mini's Prosody.
+  - **ADDENDUM 2026-04-08**: The original task said "accept self-signed cert when `tls_verify = false`" with the implication that there'd be a `tls_verify` config field. This was dropped from `XmppConfig` because we currently support only the no-verify path — adding a config field for an unimplemented `tls_verify=true` branch would let an operator silently get insecure TLS while believing they asked for verification. When real certs land (e.g. Tailscale-issued certs for chat), the `tls_verify` field and the verified branch in `connector::build_tls_config` land in the same commit.
+- [x] **2.6** `send_initial_presence()` runs on the first non-resumed `Online` event. Sends `<presence/>` with `Show::Chat` and a Sid status line ("Sid here — go ahead and waste my time."). On resumed sessions, presence is not re-sent (smacks resumption preserves it).
+- [x] **2.7** Reconnect-with-backoff loop in `serve()`. Exponential backoff capped at 60 seconds, reset to 1s on a clean session end. The backoff sleep is awaited inside `tokio::select!` against the shutdown `Notify` so a stop signal doesn't have to wait the full window. Verified by code review against telegram's pattern; live verification deferred to Phase 8.
+- [x] **2.8** **(folded forward from 7.1)** XMPP adapter wired into `main.rs` as step 5c, env-gated, shared `Arc<Dispatcher>`, shutdown via the existing `Notify`. Done now (instead of in Phase 7) so the dead-code warnings from the unwired connector don't pile up across Phase 3-6 commits. The systemd unit / NixOS module work (7.2-7.6) stays in Phase 7.
 
 ## Phase 3: Direct message handling
 
@@ -67,7 +64,7 @@ Second channel adapter, after telegram. Stress-tests the channel pattern against
 
 ## Phase 7: Wiring
 
-- [ ] **7.1** Add the xmpp adapter as step 5c in `packages/companion-core/src/main.rs`, env-gated, shared `Arc<Dispatcher>`, shutdown via the existing `Notify`.
+- [x] **7.1** ~~Add the xmpp adapter as step 5c in `packages/companion-core/src/main.rs`, env-gated, shared `Arc<Dispatcher>`, shutdown via the existing `Notify`.~~ Folded forward into Phase 2 (see 2.8). The systemd / module / host-config tasks below remain in Phase 7.
 - [ ] **7.2** Add `services.axios-companion.channels.xmpp` options to `modules/home-manager/default.nix`: `enable`, `jid`, `passwordFile`, `server` (default `127.0.0.1`), `port` (default `5222`), `tlsVerify` (default `false`), `allowedJids`, `mucRooms` (list of `{ jid, nick }`), `mentionOnly` (default `true`), `streamMode` (default `single_message`).
 - [ ] **7.3** Add an assertion: `channels.xmpp.enable -> daemon.enable`.
 - [ ] **7.4** Wire the env vars into the systemd unit, mirroring telegram's block.

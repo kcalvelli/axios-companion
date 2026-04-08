@@ -118,6 +118,31 @@ async fn main() {
         None
     };
 
+    // 5c. Start the XMPP channel adapter if enabled via environment.
+    // Phase 2 lands the connect/auth/presence/reconnect path; the dispatcher
+    // wiring (DM + MUC handling) lands in Phase 3+ of channel-xmpp.
+    let xmpp_shutdown = Arc::new(tokio::sync::Notify::new());
+    let xmpp_handle = if let Some(config) = channels::xmpp::XmppConfig::from_env() {
+        info!(
+            jid = %config.jid,
+            server = %config.server,
+            port = config.port,
+            allowed_jids = config.allowed_jids.len(),
+            muc_rooms = config.muc_rooms.len(),
+            mention_only = config.mention_only,
+            stream_mode = ?config.stream_mode,
+            "starting XMPP adapter"
+        );
+        let notify = xmpp_shutdown.clone();
+        let xmpp_dispatcher = dispatcher.clone();
+        Some(tokio::spawn(async move {
+            channels::xmpp::serve(xmpp_dispatcher, config, notify).await;
+        }))
+    } else {
+        info!("XMPP adapter disabled (COMPANION_XMPP_ENABLE != 1)");
+        None
+    };
+
     // 6. Signal readiness via sd_notify(READY=1).
     if let Err(e) = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]) {
         warn!(%e, "sd_notify READY=1 failed (not running under systemd?)");
@@ -150,11 +175,15 @@ async fn main() {
     // Graceful shutdown: signal adapters to stop, then wait for them.
     shutdown_notify.notify_one();
     telegram_shutdown.notify_one();
+    xmpp_shutdown.notify_one();
 
     if let Some(handle) = gateway_handle {
         let _ = handle.await;
     }
     if let Some(handle) = telegram_handle {
+        let _ = handle.await;
+    }
+    if let Some(handle) = xmpp_handle {
         let _ = handle.await;
     }
 

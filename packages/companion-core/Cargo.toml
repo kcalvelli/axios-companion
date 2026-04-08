@@ -22,6 +22,12 @@ teloxide = { version = "0.13", default-features = false, features = ["macros", "
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 tokio-xmpp = "5"
 xmpp-parsers = "0.22"
+# Direct deps so the xmpp channel can supply its own rustls ClientConfig.
+# tokio-xmpp 5.0.0 hardcodes its TLS trust store inside
+# `connect/tls_common.rs::establish_tls_connection` with no override hook,
+# so we implement our own ServerConnector. See channels/xmpp/connector.rs.
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "logging", "tls12"] }
+sasl = "0.5"
 futures = "0.3"
 log = "0.4"
 
