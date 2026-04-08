@@ -18,18 +18,33 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use tokio::sync::{mpsc, Notify};
+use tokio::time::Instant;
 use tokio_xmpp::connect::DnsConfig;
 use tokio_xmpp::jid::{BareJid, Jid};
 use tokio_xmpp::xmlstream::Timeouts;
 use tokio_xmpp::{Client, Event, Stanza};
 use tracing::{debug, error, info, warn};
-use xmpp_parsers::message::{Lang, Message, MessageType};
+use xmpp_parsers::message::{Id, Lang, Message, MessageType};
+use xmpp_parsers::message_correct::Replace;
 use xmpp_parsers::muc::muc::{History, Muc};
 use xmpp_parsers::presence::{Presence, Show as PresenceShow, Type as PresenceType};
 
 use crate::dispatcher::{Dispatcher, TurnEvent, TurnRequest};
 
 use connector::{build_tls_config, Connector};
+
+/// Minimum gap between XEP-0308 correction stanzas during a streaming
+/// turn. Mirrors telegram's edit-message rate (`channels::telegram::
+/// EDIT_THROTTLE`) so the streaming feel is consistent across surfaces.
+/// Faster than this and partial-support clients (anyone who renders
+/// corrections as N separate messages instead of in-place) get spammed;
+/// slower and the streaming stops feeling like streaming.
+///
+/// The first chunk of a turn is sent immediately and does not respect
+/// this throttle — the goal is "the user sees something the moment Sid
+/// has anything to say." The throttle only applies to mid-stream
+/// corrections after the initial send.
+const STREAM_THROTTLE: Duration = Duration::from_millis(1500);
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -596,39 +611,25 @@ async fn handle_chat_message(
         return;
     }
 
-    // Build the turn request and dispatch.
+    // Build the turn request and dispatch. Hand the response stream to
+    // the streaming sender, which emits an initial message immediately and
+    // throttled XEP-0308 corrections thereafter. TurnEvent::Complete and
+    // TurnEvent::Error are both handled inside `stream_single_message`.
     let turn_req = TurnRequest {
         surface_id: "xmpp".into(),
         conversation_id,
         message_text: body,
     };
-    let mut rx = dispatcher.dispatch(turn_req).await;
+    let rx = dispatcher.dispatch(turn_req).await;
 
-    // Collect everything into one final response. Phase 4 will replace this
-    // with streaming corrections (XEP-0308); for now, one stanza per turn.
-    let mut full_text = String::new();
-    while let Some(event) = rx.recv().await {
-        match event {
-            TurnEvent::TextChunk(chunk) => full_text.push_str(&chunk),
-            TurnEvent::Complete(text) => {
-                full_text = text;
-                break;
-            }
-            TurnEvent::Error(e) => {
-                full_text = format!("Something went sideways: {e}");
-                break;
-            }
-        }
-    }
-
-    if full_text.is_empty() {
-        warn!(from = %sender_bare, "dispatcher produced empty response — sending nothing");
-        return;
-    }
-
-    if let Err(e) = send_chat_reply(out_tx, &sender_bare, &full_text).await {
-        warn!(%e, from = %sender_bare, "failed to enqueue chat reply (channel closed?)");
-    }
+    stream_single_message(
+        out_tx,
+        &sender_bare,
+        MessageType::Chat,
+        rx,
+        STREAM_THROTTLE,
+    )
+    .await;
 }
 
 /// Handle one inbound `<message type="groupchat">`. Phase 5.
@@ -757,43 +758,27 @@ async fn handle_groupchat_message(
         return;
     }
 
+    // Build the turn request and dispatch. Same streaming path as DMs —
+    // the only difference is the message type and the recipient is the
+    // room JID, not a user. In MUC, XEP-0308 corrections are addressed to
+    // the room and every occupant's client sees the in-place updates
+    // (Conversations/Cheogram/Gajim handle this cleanly; older clients
+    // see N separate messages, which the throttle keeps to a minimum).
     let turn_req = TurnRequest {
         surface_id: "xmpp".into(),
         conversation_id,
         message_text: dispatch_body,
     };
-    let mut rx = dispatcher.dispatch(turn_req).await;
+    let rx = dispatcher.dispatch(turn_req).await;
 
-    // Same collect-everything-into-one-stanza pattern as DMs. Phase 4 will
-    // add streaming corrections; in MUC, XEP-0308 corrections are addressed
-    // to the room and every client in the room sees the in-place updates.
-    let mut full_text = String::new();
-    while let Some(event) = rx.recv().await {
-        match event {
-            TurnEvent::TextChunk(chunk) => full_text.push_str(&chunk),
-            TurnEvent::Complete(text) => {
-                full_text = text;
-                break;
-            }
-            TurnEvent::Error(e) => {
-                full_text = format!("Something went sideways: {e}");
-                break;
-            }
-        }
-    }
-
-    if full_text.is_empty() {
-        warn!(
-            room = %room_bare,
-            from = %sender_nick,
-            "dispatcher produced empty response — sending nothing"
-        );
-        return;
-    }
-
-    if let Err(e) = send_groupchat_reply(out_tx, &room_bare, &full_text).await {
-        warn!(%e, room = %room_bare, "failed to enqueue groupchat reply (channel closed?)");
-    }
+    stream_single_message(
+        out_tx,
+        &room_bare,
+        MessageType::Groupchat,
+        rx,
+        STREAM_THROTTLE,
+    )
+    .await;
 }
 
 /// Build a `<message type="chat">` stanza addressed to `to` and push it
@@ -831,6 +816,230 @@ async fn send_groupchat_reply(
     reply.type_ = MessageType::Groupchat;
     reply.bodies.insert(Lang(String::new()), body.to_string());
     out_tx.send(reply.into()).await
+}
+
+// ---------------------------------------------------------------------------
+// XEP-0308 streaming corrections
+// ---------------------------------------------------------------------------
+
+/// Stream a dispatcher response to one recipient using XEP-0308 Last
+/// Message Correction. The first non-empty content arriving from the
+/// dispatcher is sent immediately as a fresh `<message>` with an explicit
+/// `id`; subsequent text accumulates and, once `throttle` has elapsed
+/// since the last send AND the displayed text would actually change, a
+/// correction stanza referencing the original id is emitted.
+///
+/// On `TurnEvent::Complete(text)` the canonical final text replaces
+/// whatever was streamed (always sent if it differs from what's currently
+/// displayed). On `TurnEvent::Error(e)` an error message is sent — either
+/// as the initial message (if nothing has streamed yet) or as a final
+/// correction (if a streaming message is already on the wire).
+///
+/// The recipient is the bare JID for DMs and the bare room JID for MUC.
+/// `msg_type` selects between `Chat` and `Groupchat`. The throttle is
+/// taken as a parameter so tests can drive the function with a much
+/// smaller value than production's [`STREAM_THROTTLE`].
+///
+/// Returns when the dispatcher rx is exhausted (Complete/Error or the
+/// channel closing). If the writer channel has been closed mid-stream
+/// — which means the read loop has gone away during a session reconnect
+/// — the function logs once and returns silently. Whatever was already
+/// on the wire is whatever the user got.
+async fn stream_single_message(
+    out_tx: &mpsc::Sender<Stanza>,
+    to: &BareJid,
+    msg_type: MessageType,
+    mut rx: tokio::sync::mpsc::Receiver<TurnEvent>,
+    throttle: Duration,
+) {
+    let mut full_text = String::new();
+    let mut message_id: Option<Id> = None;
+    let mut last_send: Option<Instant> = None;
+    let mut last_sent_text = String::new();
+
+    while let Some(event) = rx.recv().await {
+        match event {
+            TurnEvent::TextChunk(chunk) => {
+                full_text.push_str(&chunk);
+                // The dispatcher can produce empty initial chunks during
+                // claude's startup phase — don't send a hollow stanza.
+                if full_text.is_empty() {
+                    continue;
+                }
+
+                if message_id.is_none() {
+                    // First non-empty content: send the initial message
+                    // immediately, no throttle. Stash the id so future
+                    // corrections can reference it via Replace.
+                    let id = new_message_id();
+                    if let Err(e) =
+                        send_initial(out_tx, to, msg_type.clone(), &id, &full_text).await
+                    {
+                        warn!(%e, %to, "failed to enqueue initial streaming message");
+                        return;
+                    }
+                    message_id = Some(id);
+                    last_send = Some(Instant::now());
+                    last_sent_text = full_text.clone();
+                } else if let Some(last) = last_send {
+                    // Mid-stream correction. Two gates: throttle elapsed
+                    // AND the visible text would actually change. The
+                    // text-changed check matters because the dispatcher
+                    // can emit chunks that resolve into nothing (think
+                    // tool-use roundtrips that produce no user-visible
+                    // delta) and we don't want to spam the room with
+                    // identical corrections.
+                    let now = Instant::now();
+                    if now.duration_since(last) >= throttle && full_text != last_sent_text {
+                        let id = message_id.as_ref().expect("checked above");
+                        if let Err(e) =
+                            send_correction(out_tx, to, msg_type.clone(), id, &full_text).await
+                        {
+                            warn!(%e, %to, "failed to enqueue streaming correction");
+                            return;
+                        }
+                        last_send = Some(now);
+                        last_sent_text = full_text.clone();
+                    }
+                }
+            }
+            TurnEvent::Complete(text) => {
+                // The dispatcher's Complete carries the canonical final
+                // text. Replace whatever we streamed with this — even if
+                // throttling skipped the last chunk, the user always sees
+                // the right thing at the end.
+                full_text = text;
+                if full_text.is_empty() {
+                    if message_id.is_none() {
+                        // No prior chunks AND no final text. Dispatcher
+                        // produced literally nothing — log and bail, same
+                        // as the pre-streaming behavior.
+                        warn!(%to, "dispatcher produced empty response — sending nothing");
+                    }
+                    // If we DID stream something and Complete is empty,
+                    // leave the streamed text as the final state. Empty
+                    // Complete means "no further changes," not "blank
+                    // out the message."
+                    return;
+                }
+                match &message_id {
+                    None => {
+                        // Single-shot path: nothing streamed, send one
+                        // initial message and we're done.
+                        let id = new_message_id();
+                        if let Err(e) =
+                            send_initial(out_tx, to, msg_type, &id, &full_text).await
+                        {
+                            warn!(%e, %to, "failed to enqueue final message");
+                        }
+                    }
+                    Some(id) => {
+                        // Streamed path: emit a final correction iff the
+                        // canonical text differs from what's currently on
+                        // the wire. Otherwise the last mid-stream send
+                        // already showed the right thing.
+                        if full_text != last_sent_text {
+                            if let Err(e) = send_correction(
+                                out_tx,
+                                to,
+                                msg_type,
+                                id,
+                                &full_text,
+                            )
+                            .await
+                            {
+                                warn!(%e, %to, "failed to enqueue final correction");
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+            TurnEvent::Error(e) => {
+                let err_text = format!("Something went sideways: {e}");
+                match &message_id {
+                    None => {
+                        // No prior message — send the error as a single
+                        // initial stanza. User sees only the error, which
+                        // is the right thing.
+                        let id = new_message_id();
+                        if let Err(send_err) =
+                            send_initial(out_tx, to, msg_type, &id, &err_text).await
+                        {
+                            warn!(%send_err, %to, "failed to enqueue error message");
+                        }
+                    }
+                    Some(id) => {
+                        // Streaming was in progress — replace the partial
+                        // reply with the error so the user doesn't see a
+                        // truncated answer dangling next to the failure.
+                        if let Err(send_err) =
+                            send_correction(out_tx, to, msg_type, id, &err_text).await
+                        {
+                            warn!(%send_err, %to, "failed to enqueue error correction");
+                        }
+                    }
+                }
+                return;
+            }
+        }
+    }
+
+    // Dispatcher rx closed without Complete or Error. Should not happen
+    // under normal operation — the dispatcher always emits one of those
+    // as the terminal event. Log and move on.
+    if message_id.is_some() {
+        debug!(%to, "dispatcher rx closed mid-stream without Complete/Error");
+    }
+}
+
+/// Generate a unique message id for the first stanza of a streaming
+/// turn. Subsequent corrections reference this id via the Replace
+/// payload, so it has to be unique within the conversation. UUID v4 is
+/// overkill in entropy but cheap and already a workspace dependency.
+/// The `sid-` prefix makes it easy to spot Sid's stanzas in raw XMPP
+/// traces.
+fn new_message_id() -> Id {
+    Id(format!("sid-{}", uuid::Uuid::new_v4()))
+}
+
+/// Build and enqueue the initial `<message>` stanza of a streaming turn.
+/// The id is set explicitly (not left for tokio-xmpp's auto-fill) so
+/// subsequent corrections can reference it via the Replace payload.
+async fn send_initial(
+    out_tx: &mpsc::Sender<Stanza>,
+    to: &BareJid,
+    msg_type: MessageType,
+    id: &Id,
+    body: &str,
+) -> Result<(), mpsc::error::SendError<Stanza>> {
+    let to_jid = Jid::from(to.clone());
+    let mut msg = Message::new(Some(to_jid));
+    msg.id = Some(id.clone());
+    msg.type_ = msg_type;
+    msg.bodies.insert(Lang(String::new()), body.to_string());
+    out_tx.send(msg.into()).await
+}
+
+/// Build and enqueue a XEP-0308 correction stanza referencing
+/// `original_id` with the updated body. The correction stanza itself
+/// gets an auto-generated id from tokio-xmpp at send time — only the
+/// `<replace id="..."/>` payload references the original.
+async fn send_correction(
+    out_tx: &mpsc::Sender<Stanza>,
+    to: &BareJid,
+    msg_type: MessageType,
+    original_id: &Id,
+    body: &str,
+) -> Result<(), mpsc::error::SendError<Stanza>> {
+    let to_jid = Jid::from(to.clone());
+    let mut msg = Message::new(Some(to_jid));
+    msg.type_ = msg_type;
+    msg.bodies.insert(Lang(String::new()), body.to_string());
+    msg = msg.with_payload(Replace {
+        id: original_id.clone(),
+    });
+    out_tx.send(msg.into()).await
 }
 
 /// Join every configured MUC room. Sends a presence stanza addressed to
@@ -1301,5 +1510,285 @@ mod tests {
             parse_mention("Sid: hello\nhow are you", "Sid"),
             Addressing::Addressed("hello\nhow are you".to_string())
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 4 — XEP-0308 streaming corrections
+    // -----------------------------------------------------------------------
+
+    /// Pull a Message out of a Stanza, panic if it isn't one. Tests only
+    /// emit chat/groupchat messages, so anything else is a bug.
+    fn unwrap_message(stanza: Stanza) -> Message {
+        match stanza {
+            Stanza::Message(m) => m,
+            other => panic!("expected Stanza::Message, got {:?}", other),
+        }
+    }
+
+    /// Read the body text of a Message. Bodies live in a BTreeMap keyed by
+    /// language tag — for our purposes there's exactly one entry under the
+    /// empty-lang key.
+    fn body_text(msg: &Message) -> &str {
+        msg.bodies
+            .values()
+            .next()
+            .map(|s| s.as_str())
+            .unwrap_or("")
+    }
+
+    /// Try to extract a Replace payload from a Message. Returns Some only
+    /// if the message is a XEP-0308 correction.
+    fn replace_payload(msg: &Message) -> Option<Replace> {
+        msg.payloads
+            .iter()
+            .find_map(|el| Replace::try_from(el.clone()).ok())
+    }
+
+    fn test_jid() -> BareJid {
+        BareJid::from_str("alice@example.org").unwrap()
+    }
+
+    /// Drive `stream_single_message` end-to-end with a feeder closure.
+    /// The closure gets the turn-event sender and may emit any sequence
+    /// of TurnEvents; the function returns when both halves complete.
+    /// Returns the full ordered list of stanzas pushed onto the writer
+    /// channel.
+    async fn run_stream_test<F, Fut>(throttle: Duration, feeder: F) -> Vec<Stanza>
+    where
+        F: FnOnce(tokio::sync::mpsc::Sender<TurnEvent>) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        // Capacity 1 on the turn channel gives us natural backpressure:
+        // the feeder's `.send().await` only returns once stream_single_
+        // message has accepted the prior event, which means we can drive
+        // the function step by step without races.
+        let (turn_tx, turn_rx) = tokio::sync::mpsc::channel::<TurnEvent>(1);
+        let (out_tx, mut out_rx) = mpsc::channel::<Stanza>(16);
+        let to = test_jid();
+
+        let stream_handle = tokio::spawn(async move {
+            stream_single_message(&out_tx, &to, MessageType::Chat, turn_rx, throttle).await;
+        });
+
+        feeder(turn_tx).await;
+
+        stream_handle.await.expect("stream task panicked");
+
+        let mut stanzas = Vec::new();
+        while let Ok(s) = out_rx.try_recv() {
+            stanzas.push(s);
+        }
+        stanzas
+    }
+
+    #[tokio::test]
+    async fn stream_complete_only_sends_one_initial() {
+        // The simplest case: dispatcher emits no chunks, just a final
+        // Complete with the canonical text. We should send exactly one
+        // initial message stanza.
+        let stanzas = run_stream_test(Duration::ZERO, |tx| async move {
+            tx.send(TurnEvent::Complete("hello world".into())).await.unwrap();
+            drop(tx);
+        })
+        .await;
+
+        assert_eq!(stanzas.len(), 1, "expected exactly one stanza");
+        let msg = unwrap_message(stanzas.into_iter().next().unwrap());
+        assert_eq!(body_text(&msg), "hello world");
+        assert!(msg.id.is_some(), "initial message must have an explicit id");
+        assert!(
+            replace_payload(&msg).is_none(),
+            "initial message must not carry a Replace payload"
+        );
+        assert_eq!(msg.type_, MessageType::Chat);
+    }
+
+    #[tokio::test]
+    async fn stream_chunk_then_complete_same_text_sends_only_initial() {
+        // First chunk lands → initial stanza. Complete arrives with the
+        // same canonical text → no extra correction (the user already
+        // sees the right thing).
+        let stanzas = run_stream_test(Duration::ZERO, |tx| async move {
+            tx.send(TurnEvent::TextChunk("hi there".into())).await.unwrap();
+            tx.send(TurnEvent::Complete("hi there".into())).await.unwrap();
+            drop(tx);
+        })
+        .await;
+
+        assert_eq!(stanzas.len(), 1, "duplicate Complete should not trigger a correction");
+        let msg = unwrap_message(stanzas.into_iter().next().unwrap());
+        assert_eq!(body_text(&msg), "hi there");
+        assert!(msg.id.is_some());
+        assert!(replace_payload(&msg).is_none());
+    }
+
+    #[tokio::test]
+    async fn stream_chunk_then_complete_different_text_sends_correction() {
+        // Chunk arrives, initial sent. Complete arrives with a different
+        // (longer) canonical text → final correction emitted referencing
+        // the initial stanza's id.
+        let stanzas = run_stream_test(Duration::ZERO, |tx| async move {
+            tx.send(TurnEvent::TextChunk("hi".into())).await.unwrap();
+            tx.send(TurnEvent::Complete("hi there friend".into())).await.unwrap();
+            drop(tx);
+        })
+        .await;
+
+        assert_eq!(stanzas.len(), 2);
+        let mut iter = stanzas.into_iter();
+
+        let initial = unwrap_message(iter.next().unwrap());
+        assert_eq!(body_text(&initial), "hi");
+        assert!(replace_payload(&initial).is_none());
+        let initial_id = initial.id.expect("initial id");
+
+        let correction = unwrap_message(iter.next().unwrap());
+        assert_eq!(body_text(&correction), "hi there friend");
+        let replace = replace_payload(&correction).expect("Replace payload");
+        assert_eq!(
+            replace.id, initial_id,
+            "correction must reference the initial message's id"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_throttle_collapses_rapid_chunks() {
+        // Three chunks back to back with a non-zero throttle. The first
+        // chunk fires the initial; the second and third are within the
+        // throttle window so neither triggers a correction; Complete
+        // emits one final correction with the canonical text.
+        let stanzas = run_stream_test(Duration::from_secs(60), |tx| async move {
+            tx.send(TurnEvent::TextChunk("a".into())).await.unwrap();
+            tx.send(TurnEvent::TextChunk("b".into())).await.unwrap();
+            tx.send(TurnEvent::TextChunk("c".into())).await.unwrap();
+            tx.send(TurnEvent::Complete("abc".into())).await.unwrap();
+            drop(tx);
+        })
+        .await;
+
+        assert_eq!(
+            stanzas.len(),
+            2,
+            "expected initial + final correction; mid-chunks must be throttled"
+        );
+        let mut iter = stanzas.into_iter();
+        assert_eq!(body_text(&unwrap_message(iter.next().unwrap())), "a");
+        let final_msg = unwrap_message(iter.next().unwrap());
+        assert_eq!(body_text(&final_msg), "abc");
+        assert!(replace_payload(&final_msg).is_some());
+    }
+
+    #[tokio::test]
+    async fn stream_zero_throttle_emits_correction_per_chunk() {
+        // With throttle = 0, every chunk after the first triggers a
+        // correction (provided the visible text actually changes).
+        // Complete with the same final text adds no extra correction.
+        let stanzas = run_stream_test(Duration::ZERO, |tx| async move {
+            tx.send(TurnEvent::TextChunk("a".into())).await.unwrap();
+            tx.send(TurnEvent::TextChunk("b".into())).await.unwrap();
+            tx.send(TurnEvent::TextChunk("c".into())).await.unwrap();
+            tx.send(TurnEvent::Complete("abc".into())).await.unwrap();
+            drop(tx);
+        })
+        .await;
+
+        // initial("a") + correction("ab") + correction("abc") + Complete same → no extra
+        assert_eq!(stanzas.len(), 3);
+        let bodies: Vec<String> = stanzas
+            .iter()
+            .map(|s| {
+                let m = match s {
+                    Stanza::Message(m) => m,
+                    _ => panic!(),
+                };
+                body_text(m).to_string()
+            })
+            .collect();
+        assert_eq!(bodies, vec!["a", "ab", "abc"]);
+    }
+
+    #[tokio::test]
+    async fn stream_error_before_any_text_sends_single_error_message() {
+        // Dispatcher fails before producing any text → one initial
+        // message containing the error string. No correction needed
+        // because there's nothing to replace.
+        let stanzas = run_stream_test(Duration::ZERO, |tx| async move {
+            tx.send(TurnEvent::Error("subprocess crashed".into())).await.unwrap();
+            drop(tx);
+        })
+        .await;
+
+        assert_eq!(stanzas.len(), 1);
+        let msg = unwrap_message(stanzas.into_iter().next().unwrap());
+        assert_eq!(body_text(&msg), "Something went sideways: subprocess crashed");
+        assert!(msg.id.is_some());
+        assert!(replace_payload(&msg).is_none());
+    }
+
+    #[tokio::test]
+    async fn stream_error_after_chunks_replaces_partial_with_error() {
+        // Dispatcher streams some text, then errors out. The user sees
+        // the partial reply briefly, then it gets replaced (XEP-0308
+        // correction) with the error message. Better than leaving a
+        // truncated half-answer dangling next to the failure.
+        let stanzas = run_stream_test(Duration::ZERO, |tx| async move {
+            tx.send(TurnEvent::TextChunk("starting to answ".into())).await.unwrap();
+            tx.send(TurnEvent::Error("connection lost".into())).await.unwrap();
+            drop(tx);
+        })
+        .await;
+
+        assert_eq!(stanzas.len(), 2);
+        let mut iter = stanzas.into_iter();
+
+        let initial = unwrap_message(iter.next().unwrap());
+        assert_eq!(body_text(&initial), "starting to answ");
+        assert!(replace_payload(&initial).is_none());
+        let initial_id = initial.id.expect("initial id");
+
+        let correction = unwrap_message(iter.next().unwrap());
+        assert_eq!(
+            body_text(&correction),
+            "Something went sideways: connection lost"
+        );
+        let replace = replace_payload(&correction).expect("Replace payload");
+        assert_eq!(replace.id, initial_id);
+    }
+
+    #[tokio::test]
+    async fn stream_empty_complete_with_no_chunks_sends_nothing() {
+        // Edge case: dispatcher closes the stream with an empty Complete
+        // and no chunks. Mirror the pre-streaming behavior — log and
+        // send nothing.
+        let stanzas = run_stream_test(Duration::ZERO, |tx| async move {
+            tx.send(TurnEvent::Complete(String::new())).await.unwrap();
+            drop(tx);
+        })
+        .await;
+
+        assert!(stanzas.is_empty(), "no stanzas should be sent for empty Complete");
+    }
+
+    #[tokio::test]
+    async fn stream_initial_id_is_unique_per_call() {
+        // Two independent streaming calls should use different message
+        // ids, so a correction in one turn never accidentally references
+        // the wrong message in another turn. UUID v4 makes this trivially
+        // true; the test guards against accidental introduction of a
+        // shared/static id later.
+        let s1 = run_stream_test(Duration::ZERO, |tx| async move {
+            tx.send(TurnEvent::Complete("first".into())).await.unwrap();
+            drop(tx);
+        })
+        .await;
+        let s2 = run_stream_test(Duration::ZERO, |tx| async move {
+            tx.send(TurnEvent::Complete("second".into())).await.unwrap();
+            drop(tx);
+        })
+        .await;
+
+        let id1 = unwrap_message(s1.into_iter().next().unwrap()).id.unwrap();
+        let id2 = unwrap_message(s2.into_iter().next().unwrap()).id.unwrap();
+        assert_ne!(id1, id2);
     }
 }
