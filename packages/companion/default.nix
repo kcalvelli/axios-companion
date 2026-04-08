@@ -29,11 +29,26 @@ let
   #   1. base AGENT.md
   #   2. user file (if set) OR base USER.md template
   #   3. each extraFile in order
-  userPath = if userFile != null then toString userFile else baseUserPath;
-  personaPaths = [ agentPath userPath ] ++ map toString extraFiles;
+  #
+  # IMPORTANT: use "${...}" interpolation, NOT toString. `toString` strips
+  # Nix string context, which prevents the output reference scanner from
+  # registering the source derivation these paths live in as a runtime
+  # dependency of the wrapper. Without that dependency, the source gets
+  # garbage-collected between rebuilds and the baked persona paths point
+  # at deleted files — emitting "persona file not found" warnings until
+  # the next rebuild-switch reimports the source. Don't undo this in a
+  # cleanup pass.
+  userPath = if userFile != null then "${userFile}" else baseUserPath;
+  personaPaths = [ agentPath userPath ] ++ map (p: "${p}") extraFiles;
+
+  # Manual single-quote escape that preserves Nix string context.
+  # Do NOT replace this with lib.escapeShellArg — it calls toString
+  # internally (see nixpkgs lib/strings.nix), which undoes the context
+  # preservation above and reintroduces the GC bug.
+  escapeArg = s: "'" + builtins.replaceStrings [ "'" ] [ "'\\''" ] s + "'";
 
   # Bash array body: one escaped path per line.
-  personaArrayBody = lib.concatMapStringsSep "\n" (p: "  ${lib.escapeShellArg p}") personaPaths;
+  personaArrayBody = lib.concatMapStringsSep "\n" (p: "  ${escapeArg p}") personaPaths;
 
   hasUserFile = if userFile != null then "1" else "0";
   mcpExplicit = if mcpConfigFile != null then toString mcpConfigFile else "";
