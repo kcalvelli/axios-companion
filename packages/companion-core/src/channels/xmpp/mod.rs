@@ -16,6 +16,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use futures::StreamExt;
 use tokio::sync::{mpsc, Notify};
 use tokio::time::Instant;
@@ -24,6 +26,7 @@ use tokio_xmpp::jid::{BareJid, Jid};
 use tokio_xmpp::xmlstream::Timeouts;
 use tokio_xmpp::{Client, Event, Stanza};
 use tracing::{debug, error, info, warn};
+use xmpp_parsers::delay::Delay;
 use xmpp_parsers::message::{Id, Lang, Message, MessageType};
 use xmpp_parsers::message_correct::Replace;
 use xmpp_parsers::muc::muc::{History, Muc};
@@ -45,6 +48,27 @@ use connector::{build_tls_config, Connector};
 /// has anything to say." The throttle only applies to mid-stream
 /// corrections after the initial send.
 const STREAM_THROTTLE: Duration = Duration::from_millis(1500);
+
+/// Maximum age of an inbound message before we treat it as a server
+/// archive replay (XEP-0203 `<delay/>`) and silently drop it. Without
+/// this guard, every reconnect causes Prosody to redeliver the recent
+/// message archive — and the bot would dutifully re-respond to every
+/// historical message in the conversation, burning tokens and spamming
+/// the user with re-replies to things they said yesterday.
+///
+/// 30 seconds is wide enough to absorb clock skew and brief network
+/// hiccups (anything in this window is plausibly a real message that
+/// got delayed in flight) and tight enough that no actual archive
+/// content sneaks through (server archives are always at least minutes
+/// old by the time they're delivered).
+///
+/// Discovered the hard way 2026-04-08 during channel-xmpp Phase 4.2
+/// live test: every restart triggered ~18 archive-replay turns before
+/// the user could send anything new. The writer-channel architecture
+/// from commit 1 made the bug newly visible — pre-refactor it would
+/// have appeared as the daemon being unresponsive for ten minutes
+/// after restart, post-refactor it streams the replays in parallel.
+const MAX_REPLAY_AGE: Duration = Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -547,6 +571,39 @@ fn is_allowed(config: &XmppConfig, sender: &BareJid) -> bool {
     config.allowed_jids.contains(sender)
 }
 
+/// Returns true if the message carries a XEP-0203 `<delay/>` payload
+/// indicating it was originally sent more than [`MAX_REPLAY_AGE`] ago.
+/// Used to drop server archive replays — Prosody redelivers recent
+/// message history on every reconnect, and without this guard the bot
+/// re-responds to its own past conversation every time it restarts.
+///
+/// Walks the message's payload list looking for any element that parses
+/// as a Delay. The first match wins (a single message wouldn't have
+/// multiple Delay payloads in any sane scenario). Returns false if no
+/// Delay is present, if the Delay parses but the timestamp is recent,
+/// or if the system clock is somehow earlier than the Delay's stamp
+/// (negative age means the message is "from the future" — a clock-skew
+/// edge case that shouldn't be treated as a replay).
+fn is_archive_delayed(message: &Message) -> bool {
+    let delay = match message
+        .payloads
+        .iter()
+        .find_map(|el| Delay::try_from(el.clone()).ok())
+    {
+        Some(d) => d,
+        None => return false,
+    };
+
+    let stamp_secs = delay.stamp.0.timestamp();
+    let now_secs = match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(d) => d.as_secs() as i64,
+        Err(_) => return false,
+    };
+
+    let age_secs = now_secs - stamp_secs;
+    age_secs > MAX_REPLAY_AGE.as_secs() as i64
+}
+
 /// Handle one inbound `<message type="chat">`. Phase 3 does the simplest
 /// possible thing: collect the dispatcher response into one final string
 /// and send it back as a single chat stanza. Streaming with XEP-0308
@@ -583,6 +640,20 @@ async fn handle_chat_message(
             return;
         }
     };
+
+    // Archive replay drop. If the server is redelivering history (XEP-0203
+    // <delay/> with a stamp older than MAX_REPLAY_AGE), the message is not
+    // a live request — it's something the user said in the past that we've
+    // already responded to. Without this check, every reconnect to Prosody
+    // triggers an avalanche of re-responses to historical DMs.
+    if is_archive_delayed(message) {
+        debug!(
+            from = %sender_bare,
+            body_len = body.len(),
+            "dropping archive-delivered chat message (XEP-0203 delay > MAX_REPLAY_AGE)"
+        );
+        return;
+    }
 
     // Allowlist enforcement.
     if !is_allowed(config, &sender_bare) {
@@ -714,6 +785,21 @@ async fn handle_groupchat_message(
             return;
         }
     };
+
+    // Archive replay drop. MUC history-on-join is the canonical example:
+    // when the bot joins a room, the server sends back the recent message
+    // archive (we already cap that to 0 stanzas in `join_muc_rooms`, but
+    // belt-and-suspenders for any future config change or server quirk).
+    // Same XEP-0203 <delay/> check as the DM path.
+    if is_archive_delayed(message) {
+        debug!(
+            room = %room_bare,
+            from = %sender_nick,
+            body_len = body.len(),
+            "dropping archive-delivered groupchat message (XEP-0203 delay > MAX_REPLAY_AGE)"
+        );
+        return;
+    }
 
     // Mention parsing: in mention_only mode, decide whether to respond and
     // (for address-style prefixes) what body text to send to the dispatcher.
@@ -1768,6 +1854,95 @@ mod tests {
 
         assert!(stanzas.is_empty(), "no stanzas should be sent for empty Complete");
     }
+
+    // -----------------------------------------------------------------------
+    // Phase 4 — XEP-0203 archive replay drop
+    // -----------------------------------------------------------------------
+
+    /// Build a Message with an attached XEP-0203 Delay payload pointing
+    /// `secs_ago` seconds in the past. Used by the replay tests below.
+    fn message_with_delay(body: &str, secs_ago: i64) -> Message {
+        use xmpp_parsers::date::DateTime as XmppDateTime;
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let stamp_secs = now_secs - secs_ago;
+        // chrono::DateTime<FixedOffset> from a unix timestamp
+        let stamp_chrono = chrono::DateTime::from_timestamp(stamp_secs, 0)
+            .unwrap()
+            .fixed_offset();
+        let delay = Delay {
+            from: None,
+            stamp: XmppDateTime(stamp_chrono),
+            data: None,
+        };
+        let mut msg = Message::new(None);
+        msg.bodies.insert(Lang(String::new()), body.to_string());
+        msg.payloads.push(delay.into());
+        msg
+    }
+
+    #[test]
+    fn is_archive_delayed_returns_false_when_no_delay() {
+        let mut msg = Message::new(None);
+        msg.bodies.insert(Lang(String::new()), "live message".to_string());
+        assert!(!is_archive_delayed(&msg));
+    }
+
+    #[test]
+    fn is_archive_delayed_returns_true_for_old_delay() {
+        // One hour ago — well past the 30s threshold.
+        let msg = message_with_delay("ancient history", 3600);
+        assert!(is_archive_delayed(&msg));
+    }
+
+    #[test]
+    fn is_archive_delayed_returns_false_for_recent_delay() {
+        // 5s ago — inside the 30s grace window. Could be a real message
+        // that took a moment to traverse the network. Don't drop it.
+        let msg = message_with_delay("just delayed in flight", 5);
+        assert!(!is_archive_delayed(&msg));
+    }
+
+    #[test]
+    fn is_archive_delayed_returns_false_for_delay_at_exact_threshold() {
+        // Exactly at the boundary. The check is `> MAX_REPLAY_AGE`, not
+        // `>=`, so a stamp exactly at 30s ago should NOT be dropped. This
+        // test guards against accidentally flipping the comparison.
+        let msg = message_with_delay("borderline", MAX_REPLAY_AGE.as_secs() as i64);
+        assert!(!is_archive_delayed(&msg));
+    }
+
+    #[test]
+    fn is_archive_delayed_returns_false_for_future_delay() {
+        // Stamp from the "future" (clock skew between bot and server).
+        // The age computation produces a negative number which fails the
+        // > threshold check, so the message passes through. This is the
+        // right call: a server that thinks Sid is in 2027 should not
+        // cause Sid to silently drop everything.
+        let msg = message_with_delay("clock skew", -120);
+        assert!(!is_archive_delayed(&msg));
+    }
+
+    #[test]
+    fn is_archive_delayed_returns_false_when_payload_is_not_delay() {
+        // Message has a payload but it's a Replace (XEP-0308), not a
+        // Delay. Should not be confused for a delay element.
+        let mut msg = Message::new(None);
+        msg.bodies.insert(Lang(String::new()), "correction".to_string());
+        msg.payloads.push(
+            Replace {
+                id: Id("some-id".to_string()),
+            }
+            .into(),
+        );
+        assert!(!is_archive_delayed(&msg));
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 4 — XEP-0308 streaming corrections (continued)
+    // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn stream_initial_id_is_unique_per_call() {

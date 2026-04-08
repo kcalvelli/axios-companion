@@ -35,3 +35,9 @@ log = "0.4"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+# chrono is transitive via xmpp-parsers but we need a direct path in
+# the xmpp adapter's archive-replay tests to construct DateTimes from
+# unix timestamps. Test-only — production code goes through
+# xmpp-parsers::date::DateTime via .0.timestamp() with no direct chrono
+# usage.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
