@@ -203,20 +203,31 @@ impl Dispatcher {
             }
         };
 
-        // Build the companion invocation.
+        // Build the companion invocation. The argv order is load-bearing:
+        // `-p -- <text>` MUST come last so the `--` flag-stop only blocks
+        // claude's parser from interpreting the prompt body as a flag,
+        // without also eating downstream arguments. Without this, a prompt
+        // body that begins with `-` (a common case in MUC after mention
+        // stripping — "Sid - hi" → "- hi") trips claude's CLI parser with
+        // `error: unknown option '- hi'` and the subprocess exits with
+        // status 1. Verified live against mini's claude-code 2.1.92 in
+        // 2026-04-08 — see channel-xmpp Phase 5 live MUC test for context.
         let mut cmd = Command::new(companion_cmd);
+        cmd.arg("--output-format")
+            .arg("stream-json")
+            .arg("--verbose");
         if let Some(ref resume_id) = claude_session_id {
             cmd.arg("--resume").arg(resume_id);
         }
-        cmd.arg("-p")
-            .arg(&req.message_text)
-            .arg("--output-format")
-            .arg("stream-json")
-            .arg("--verbose");
+        cmd.arg("-p").arg("--").arg(&req.message_text);
 
         cmd.envs(extra_env);
         cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
+        // stderr is inherited (goes to journald via the parent) so claude's
+        // own error messages are visible without us having to scrape them.
+        // The previous `Stdio::piped()` was a debugging dead-end — we never
+        // read from it, which silently dropped every claude error.
+        cmd.stderr(std::process::Stdio::inherit());
 
         info!(
             surface = %req.surface_id,

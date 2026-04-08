@@ -242,8 +242,8 @@ enum Addressing {
 /// Decide whether `body` addresses a bot named `nick`. Case-insensitive on
 /// the nick — humans are sloppy. The recognized prefix forms are:
 ///
-/// - `Sid: hello` / `Sid, hello` / `Sid hello`
-/// - `@Sid: hello` / `@Sid, hello` / `@Sid hello`
+/// - `Sid: hello` / `Sid, hello` / `Sid - hello` / `Sid hello`
+/// - `@Sid: hello` / `@Sid, hello` / `@Sid - hello` / `@Sid hello`
 /// - bare `Sid` or bare `@Sid` (treated as a ping with empty body)
 ///
 /// Beyond prefixes, any standalone `@Sid` token (followed by whitespace or
@@ -279,12 +279,24 @@ fn parse_mention(body: &str, nick: &str) -> Addressing {
                 // Bare "Sid" or "@Sid" — treat as a ping with no payload.
                 return Addressing::Addressed(String::new());
             }
-            Some(':') | Some(',') => {
+            Some(':') | Some(',') | Some('-') => {
                 // Strip the separator AND any leading whitespace after it.
+                // The `-` form covers "Sid - hi", which humans type all
+                // the time and which would otherwise leak a leading dash
+                // into the dispatch body (and historically tripped the
+                // claude CLI parser — see dispatcher.rs comment).
                 return Addressing::Addressed(rest[1..].trim_start().to_string());
             }
             Some(c) if c.is_whitespace() => {
-                return Addressing::Addressed(rest.trim_start().to_string());
+                // After consuming the leading whitespace, also consume one
+                // more separator char if present, so "Sid - hi" and
+                // "Sid -hi" both yield "hi" and not "- hi" / "-hi".
+                let after_ws = rest.trim_start();
+                let stripped = after_ws
+                    .strip_prefix([':', ',', '-'])
+                    .map(|s| s.trim_start())
+                    .unwrap_or(after_ws);
+                return Addressing::Addressed(stripped.to_string());
             }
             _ => {
                 // "Sidney", "Sidekick", etc — not a match, fall through.
@@ -1087,6 +1099,32 @@ mod tests {
         assert_eq!(
             parse_mention("Sid hello there", "Sid"),
             Addressing::Addressed("hello there".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_mention_strips_dash_separator() {
+        // The case that broke the very first live MUC test (2026-04-08).
+        // Keith typed "Sid - hi"; the parser used to leave "- hi" in the
+        // dispatch body, and the dispatcher's `claude -p "- hi"` invocation
+        // tripped on the leading dash with `error: unknown option '- hi'`.
+        // The dispatcher.rs reorder is the real fix; this test makes sure
+        // the parser also strips the dash so the dispatch body is clean.
+        assert_eq!(
+            parse_mention("Sid - hi", "Sid"),
+            Addressing::Addressed("hi".to_string())
+        );
+        assert_eq!(
+            parse_mention("Sid -hi", "Sid"),
+            Addressing::Addressed("hi".to_string())
+        );
+        assert_eq!(
+            parse_mention("Sid- hi", "Sid"),
+            Addressing::Addressed("hi".to_string())
+        );
+        assert_eq!(
+            parse_mention("@Sid - hi", "Sid"),
+            Addressing::Addressed("hi".to_string())
         );
     }
 
