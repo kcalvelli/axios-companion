@@ -226,6 +226,117 @@ in
       };
     };
 
+    channels.xmpp = {
+      enable = lib.mkEnableOption "XMPP channel adapter inside the companion daemon";
+
+      jid = lib.mkOption {
+        type = lib.types.str;
+        description = ''
+          Bare JID for the bot (e.g. `sid@chat.example.org`). The account
+          must already exist on the XMPP server — the daemon does not
+          register accounts.
+        '';
+        example = "sid@chat.taile0fb4.ts.net";
+      };
+
+      passwordFile = lib.mkOption {
+        type = lib.types.path;
+        description = ''
+          Path to a file containing the bot's XMPP password (one line,
+          no trailing newline). Compatible with agenix-managed secrets.
+        '';
+        example = lib.literalExpression "/run/agenix/xmpp-bot-password";
+      };
+
+      server = lib.mkOption {
+        type = lib.types.str;
+        default = "127.0.0.1";
+        description = ''
+          Hostname or IP to connect to. Defaults to loopback because the
+          most common deployment runs the bot on the same host as Prosody.
+          Set to a Tailscale hostname (e.g. `chat.taile0fb4.ts.net`) to
+          connect through a Tailscale Serve TCP-passthrough endpoint.
+          DNS SRV records are NOT used — the daemon connects directly to
+          the address you give it.
+        '';
+      };
+
+      port = lib.mkOption {
+        type = lib.types.port;
+        default = 5222;
+        description = ''
+          TCP port for client-to-server XMPP. Default 5222 covers both
+          loopback Prosody and Tailscale Serve `--tcp=5222` passthrough.
+        '';
+      };
+
+      allowedJids = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        description = ''
+          Bare JIDs allowed to DM the bot. Empty list means nobody gets
+          through — deny by default, matching the telegram channel.
+        '';
+        example = [ "keith@chat.example.org" ];
+      };
+
+      mucRooms = lib.mkOption {
+        type = lib.types.listOf (lib.types.submodule {
+          options = {
+            jid = lib.mkOption {
+              type = lib.types.str;
+              description = "Bare JID of the MUC room.";
+              example = "xojabo@muc.chat.example.org";
+            };
+            nick = lib.mkOption {
+              type = lib.types.str;
+              description = "Nick to use when joining the room.";
+              example = "Sid";
+            };
+          };
+        });
+        default = [ ];
+        description = ''
+          MUC rooms to auto-join on connection. NOTE: Phase 5 of the
+          channel-xmpp openspec change has not yet shipped, so configuring
+          rooms here causes the env var to be set but the daemon will log
+          "MUC join deferred to Phase 5" and not actually join. When Phase
+          5 lands, the join activates automatically on next rebuild.
+        '';
+        example = lib.literalExpression ''
+          [ { jid = "xojabo@muc.chat.example.org"; nick = "Sid"; } ]
+        '';
+      };
+
+      mentionOnly = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          When true, the bot only responds in MUC rooms when explicitly
+          addressed by nick. **Inverted from telegram's default** (false)
+          because high-volume household rooms like xojabo would otherwise
+          burn tokens on every message.
+        '';
+      };
+
+      streamMode = lib.mkOption {
+        type = lib.types.enum [ "single_message" "multi_message" ];
+        default = "single_message";
+        description = ''
+          How to render streaming responses.
+          `single_message`: send the first chunk, then update via XEP-0308
+          Last Message Correction stanzas as chunks arrive.
+          `multi_message`: collect full response, split at ~3000-char
+          boundaries (the empirical comfortable size for Conversations,
+          Gajim, and Dino).
+          NOTE: Phase 4 of channel-xmpp has not yet shipped — the current
+          handler always collects to a single final stanza regardless of
+          this setting. The mode is wired so the env var works once the
+          streaming code lands.
+        '';
+      };
+    };
+
     gateway.openai = {
       enable = lib.mkEnableOption "OpenAI-compatible HTTP gateway inside the companion daemon";
 
@@ -285,6 +396,10 @@ in
           assertion = cfg.channels.telegram.enable -> cfg.daemon.enable;
           message = "services.axios-companion.channels.telegram requires daemon.enable — the adapter runs inside the daemon";
         }
+        {
+          assertion = cfg.channels.xmpp.enable -> cfg.daemon.enable;
+          message = "services.axios-companion.channels.xmpp requires daemon.enable — the adapter runs inside the daemon";
+        }
       ];
 
       # When the CLI is active it owns the `companion` name on the user's
@@ -329,6 +444,18 @@ in
             "COMPANION_TELEGRAM_ALLOWED_USERS=${lib.concatMapStringsSep "," toString cfg.channels.telegram.allowedUsers}"
             "COMPANION_TELEGRAM_MENTION_ONLY=${if cfg.channels.telegram.mentionOnly then "1" else "0"}"
             "COMPANION_TELEGRAM_STREAM_MODE=${cfg.channels.telegram.streamMode}"
+          ] ++ lib.optionals cfg.channels.xmpp.enable [
+            "COMPANION_XMPP_ENABLE=1"
+            "COMPANION_XMPP_JID=${cfg.channels.xmpp.jid}"
+            "COMPANION_XMPP_PASSWORD_FILE=${cfg.channels.xmpp.passwordFile}"
+            "COMPANION_XMPP_SERVER=${cfg.channels.xmpp.server}"
+            "COMPANION_XMPP_PORT=${toString cfg.channels.xmpp.port}"
+            "COMPANION_XMPP_ALLOWED_JIDS=${lib.concatStringsSep "," cfg.channels.xmpp.allowedJids}"
+            "COMPANION_XMPP_MUC_ROOMS=${
+              lib.concatMapStringsSep "," (r: "${r.jid}/${r.nick}") cfg.channels.xmpp.mucRooms
+            }"
+            "COMPANION_XMPP_MENTION_ONLY=${if cfg.channels.xmpp.mentionOnly then "1" else "0"}"
+            "COMPANION_XMPP_STREAM_MODE=${cfg.channels.xmpp.streamMode}"
           ];
         };
 
