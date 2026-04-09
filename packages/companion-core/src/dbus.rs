@@ -11,7 +11,7 @@ use zbus::object_server::SignalEmitter;
 use zbus::{interface, Connection};
 use tracing::{info, warn};
 
-use crate::dispatcher::{Dispatcher, TurnEvent, TurnRequest};
+use crate::dispatcher::{Dispatcher, TrustLevel, TurnEvent, TurnRequest};
 
 /// Shared daemon state accessible from the D-Bus interface.
 pub struct CompanionInterface {
@@ -45,10 +45,19 @@ impl CompanionInterface {
             ));
         }
 
+        // D-Bus trust = Owner. The org.axios.Companion1 interface lives
+        // on the session bus, which is UID-guarded — only processes
+        // running as Keith can reach it. Anything able to call this is
+        // already running with Keith's trust. (Pre-existing concern:
+        // any process Keith runs gets Owner trust here, including a
+        // compromised npm install or browser tab reaching localhost
+        // through dbus-broker. Tracked separately, not blocking this
+        // change.)
         let req = TurnRequest {
             surface_id: surface.to_string(),
             conversation_id: conversation_id.to_string(),
             message_text: message.to_string(),
+            trust: TrustLevel::Owner,
         };
 
         self.in_flight.fetch_add(1, Ordering::Relaxed);
@@ -93,10 +102,13 @@ impl CompanionInterface {
             ));
         }
 
+        // Same Owner-trust rationale as send_message above — the
+        // session bus is UID-guarded.
         let req = TurnRequest {
             surface_id: surface.to_string(),
             conversation_id: conversation_id.to_string(),
             message_text: message.to_string(),
+            trust: TrustLevel::Owner,
         };
 
         let mut rx = self.dispatcher.dispatch(req).await;

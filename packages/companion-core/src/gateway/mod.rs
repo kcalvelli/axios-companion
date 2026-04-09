@@ -20,7 +20,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 use tracing::{debug, error, info, warn};
 
-use crate::dispatcher::{Dispatcher, TurnEvent, TurnRequest};
+use crate::dispatcher::{Dispatcher, TrustLevel, TurnEvent, TurnRequest};
 use types::*;
 
 // ---------------------------------------------------------------------------
@@ -153,10 +153,18 @@ async fn chat_completions(
     );
     debug!(message_text = %message_text, "full message to dispatcher");
 
+    // openai-gateway trust = Anonymous, hardcoded. The HTTP endpoint
+    // has NO authentication and is bound to COMPANION_GATEWAY_BIND
+    // (default 0.0.0.0:18789), which is reachable from anything on
+    // the LAN or — depending on the daemon host — the wider network.
+    // Until per-key auth lands on the gateway, every gateway turn must
+    // run with Anonymous trust so the deny list strips Bash/Edit/MCP/etc.
+    // Do NOT upgrade this to Owner without solving auth first.
     let turn_req = TurnRequest {
         surface_id: "openai".into(),
         conversation_id,
         message_text,
+        trust: TrustLevel::Anonymous,
     };
 
     let created = state.start_time;

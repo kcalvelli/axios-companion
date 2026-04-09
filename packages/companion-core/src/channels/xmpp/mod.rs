@@ -32,7 +32,7 @@ use xmpp_parsers::message_correct::Replace;
 use xmpp_parsers::muc::muc::{History, Muc};
 use xmpp_parsers::presence::{Presence, Show as PresenceShow, Type as PresenceType};
 
-use crate::dispatcher::{Dispatcher, TurnEvent, TurnRequest};
+use crate::dispatcher::{Dispatcher, TrustLevel, TurnEvent, TurnRequest};
 
 use connector::{build_tls_config, Connector};
 
@@ -686,10 +686,15 @@ async fn handle_chat_message(
     // the streaming sender, which emits an initial message immediately and
     // throttled XEP-0308 corrections thereafter. TurnEvent::Complete and
     // TurnEvent::Error are both handled inside `stream_single_message`.
+    // DM trust = Owner. The sender already passed `is_allowed(jid)`
+    // above (allowed_jids), so they're a verified owner identity.
+    // Owner trust grants the curated MCP allowlist on top of Keith's
+    // user-level allow rules — see TrustLevel::Owner in dispatcher.rs.
     let turn_req = TurnRequest {
         surface_id: "xmpp".into(),
         conversation_id,
         message_text: body,
+        trust: TrustLevel::Owner,
     };
     let rx = dispatcher.dispatch(turn_req).await;
 
@@ -850,10 +855,20 @@ async fn handle_groupchat_message(
     // the room and every occupant's client sees the in-place updates
     // (Conversations/Cheogram/Gajim handle this cleanly; older clients
     // see N separate messages, which the throttle keeps to a minimum).
+    // MUC trust = Anonymous, always. There is no per-user JID-level
+    // allowlist for groupchat — sender identity is just a nick, room
+    // membership is the only gate, and any room member could be a
+    // vector. The Anonymous tier strips Bash/Edit/Read/MCP/etc. from
+    // the model's view via permissions.deny so MUC turns are pure
+    // conversation. If you ever want xojabo (or another private room)
+    // to grant tool access, add a `trusted_mucs: HashSet<BareJid>` to
+    // XmppConfig and conditionally upgrade to TrustLevel::Owner here
+    // — do NOT just flip this constant.
     let turn_req = TurnRequest {
         surface_id: "xmpp".into(),
         conversation_id,
         message_text: dispatch_body,
+        trust: TrustLevel::Anonymous,
     };
     let rx = dispatcher.dispatch(turn_req).await;
 

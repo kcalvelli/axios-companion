@@ -15,12 +15,96 @@ use crate::store::SessionStore;
 // Public types
 // ---------------------------------------------------------------------------
 
+/// Per-surface trust tier. Decides which Claude Code tools the spawned
+/// companion subprocess is allowed to call. Set at the channel adapter
+/// boundary, after that surface's existing identity check (allowed_jids,
+/// allowed_users, etc.) passes.
+///
+/// Two tiers, deliberately. There is no in-between — every surface is
+/// either "Keith is the verified speaker" or "anyone could be on the wire".
+/// If you ever need a third tier, add a `trusted_<surface>` config to the
+/// channel adapter and decide there, not here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustLevel {
+    /// The surface has verified the speaker is the owner. The companion
+    /// subprocess gets the curated MCP allowlist (mail/dav/sentinel) on
+    /// top of whatever Keith's user-level `~/.claude/settings.local.json`
+    /// already permits. Owner == Keith, so inheriting his interactive
+    /// allow list is correct, not a leak.
+    Owner,
+    /// The surface cannot vouch for the speaker (XMPP MUC, openai-gateway
+    /// over HTTP). Strip every dangerous tool from the model's view via
+    /// `permissions.deny`, so it never even sees them as options. Replies
+    /// in this tier are pure conversation — no tool calls, no file
+    /// access, no MCP, no shell.
+    Anonymous,
+}
+
 /// A request to process a single turn.
 #[derive(Debug, Clone)]
 pub struct TurnRequest {
     pub surface_id: String,
     pub conversation_id: String,
     pub message_text: String,
+    /// The trust tier the originating surface vouches for. The dispatcher
+    /// translates this into per-tier `--permission-mode dontAsk --settings`
+    /// flags on the companion subprocess. Required, not defaulted —
+    /// channel adapters MUST decide explicitly.
+    pub trust: TrustLevel,
+}
+
+// ---------------------------------------------------------------------------
+// Per-trust-tier Claude Code settings JSON
+// ---------------------------------------------------------------------------
+//
+// Both literals are passed inline via `--settings '<json>'` on the
+// companion subprocess argv (see run_turn). The shape matches
+// `~/.claude/settings.json`'s `permissions.{allow,deny}`. Inline settings
+// are MERGED with the user-level settings file, NOT replaced — verified
+// 2026-04-09 against claude-code 2.1.92.
+//
+// Owner uses an `allow` list because the merge is desirable: Keith's
+// own interactive allow rules + the curated MCP set = full owner
+// toolkit, no Keith intervention needed.
+//
+// Anonymous uses a `deny` list, NOT `allow`-with-empty, because the
+// merge would cause Keith's interactive allow rules to leak through.
+// `permissions.deny` strips tools from the model's `tools[]` array
+// entirely (verified live: the model can't even ToolSearch for a
+// denied tool), so anonymous turns never produce hallucinated
+// tool-result text.
+//
+// Wildcards (`*`, `mcp__*`) do NOT work in either list — verified
+// against claude-code 2.1.92. Every tool name must be enumerated.
+// New built-in or MCP tools added by claude-code or by the daemon's
+// `--mcp-config` need to be added to ANONYMOUS_DENY below or they
+// will silently start being allowed in MUC / openai-gateway turns.
+
+const OWNER_SETTINGS_JSON: &str = r#"{"permissions":{"allow":["mcp__axios-ai-mail__*","mcp__mcp-dav__*","mcp__sentinel__*"]}}"#;
+
+// Enumerated deny list for the Anonymous tier. Includes:
+//   - all built-in claude-code tools (Bash, Edit, Read, ...) observed
+//     in the init event of a non-bare claude invocation
+//   - all deferred tools that could create state, spawn agents, or
+//     cost money (Cron*, Task, Worktree*, RemoteTrigger, Skill)
+//   - every MCP tool the daemon's --mcp-config could plausibly load
+//     (axios-ai-mail, mcp-dav, sentinel) plus the always-loaded
+//     claude_ai_Gmail / claude_ai_Google_Calendar OAuth flows
+//
+// Tools intentionally NOT denied (because they're UI/state-only and
+// can't affect the daemon or the outside world): AskUserQuestion,
+// EnterPlanMode, ExitPlanMode, TodoWrite, TaskOutput, TaskStop,
+// ToolSearch (denying ToolSearch breaks the model's ability to
+// discover tools, but since everything else is denied that's moot).
+// ToolSearch is left in only because the model uses it harmlessly
+// when it can't find a tool — see the live pre-flight transcript.
+const ANONYMOUS_SETTINGS_JSON: &str = r#"{"permissions":{"allow":[],"deny":["Bash","Edit","Write","Read","Glob","Grep","WebFetch","WebSearch","NotebookEdit","Task","Skill","RemoteTrigger","CronCreate","CronDelete","CronList","EnterWorktree","ExitWorktree","mcp__axios-ai-mail__bulk_update_tags","mcp__axios-ai-mail__compose_email","mcp__axios-ai-mail__delete_by_filter","mcp__axios-ai-mail__delete_email","mcp__axios-ai-mail__get_unread_count","mcp__axios-ai-mail__list_accounts","mcp__axios-ai-mail__list_tags","mcp__axios-ai-mail__mark_read","mcp__axios-ai-mail__read_email","mcp__axios-ai-mail__reply_to_email","mcp__axios-ai-mail__restore_email","mcp__axios-ai-mail__search_emails","mcp__axios-ai-mail__send_email","mcp__axios-ai-mail__update_tags","mcp__mcp-dav__create_contact","mcp__mcp-dav__create_event","mcp__mcp-dav__delete_contact","mcp__mcp-dav__get_contact","mcp__mcp-dav__get_free_busy","mcp__mcp-dav__list_contacts","mcp__mcp-dav__list_events","mcp__mcp-dav__search_contacts","mcp__mcp-dav__search_events","mcp__mcp-dav__update_contact","mcp__sentinel__check_fleet_health","mcp__sentinel__host_disk","mcp__sentinel__host_gpu","mcp__sentinel__host_temperatures","mcp__sentinel__list_hosts","mcp__sentinel__query_host","mcp__sentinel__reboot_host","mcp__sentinel__restart_service","mcp__sentinel__system_status","mcp__sentinel__view_logs","mcp__claude_ai_Gmail__authenticate","mcp__claude_ai_Google_Calendar__authenticate"]}}"#;
+
+fn settings_json_for(trust: TrustLevel) -> &'static str {
+    match trust {
+        TrustLevel::Owner => OWNER_SETTINGS_JSON,
+        TrustLevel::Anonymous => ANONYMOUS_SETTINGS_JSON,
+    }
 }
 
 /// Events emitted during a turn.
@@ -229,6 +313,21 @@ impl Dispatcher {
         // `error: unknown option '- hi'` and the subprocess exits with
         // status 1. Verified live against mini's claude-code 2.1.92 in
         // 2026-04-08 — see channel-xmpp Phase 5 live MUC test for context.
+        //
+        // The `--permission-mode dontAsk` + `--settings` pair MUST sit
+        // between `--include-partial-messages` and `--resume` so that
+        // `-p --` stays terminal. dontAsk + per-tier settings is what
+        // lets channel-delivered turns use MCP tools (Owner) or refuse
+        // them visibly (Anonymous) instead of hanging on a permission
+        // prompt that nobody can answer. See `TrustLevel` and
+        // `settings_json_for` above for the trust model.
+        //
+        // Note: `companion` resolves via the daemon's systemd PATH
+        // override to a writeShellApplication wrapper (see
+        // packages/companion/default.nix) which builds its own args[]
+        // array (system prompt, workspace dir, --mcp-config) and ends
+        // with `exec claude "${args[@]}" "$@"`. Everything we append
+        // here lands in `"$@"` and reaches claude unchanged.
         let mut cmd = Command::new(companion_cmd);
         cmd.arg("--output-format")
             .arg("stream-json")
@@ -245,7 +344,18 @@ impl Dispatcher {
             // pure-text turn produces exactly one chunk and zero
             // visible streaming. See dispatcher's stream_event handler
             // below for how the deltas are unwrapped.
-            .arg("--include-partial-messages");
+            .arg("--include-partial-messages")
+            // --permission-mode dontAsk: never prompt the user for tool
+            // approval (there is no user at this subprocess); instead
+            // either silently allow per the merged settings or deny with
+            // a tool_result error. --settings: per-tier inline JSON that
+            // either adds the curated MCP allow list (Owner) or denies
+            // every dangerous tool by name (Anonymous). See the constants
+            // and `settings_json_for` near the top of this file.
+            .arg("--permission-mode")
+            .arg("dontAsk")
+            .arg("--settings")
+            .arg(settings_json_for(req.trust));
         if let Some(ref resume_id) = claude_session_id {
             cmd.arg("--resume").arg(resume_id);
         }
@@ -485,11 +595,12 @@ mod tests {
         Dispatcher::with_command(store, mock_script(), env)
     }
 
-    fn make_request(surface: &str, conv: &str, msg: &str) -> TurnRequest {
+    fn make_request(surface: &str, conv: &str, msg: &str, trust: TrustLevel) -> TurnRequest {
         TurnRequest {
             surface_id: surface.into(),
             conversation_id: conv.into(),
             message_text: msg.into(),
+            trust,
         }
     }
 
@@ -505,7 +616,7 @@ mod tests {
     async fn normal_turn_produces_chunks_and_complete() {
         if !mock_available() { return; }
         let dispatcher = mock_dispatcher_with("normal", "test-session-001");
-        let rx = dispatcher.dispatch(make_request("dbus", "conv-1", "hello")).await;
+        let rx = dispatcher.dispatch(make_request("dbus", "conv-1", "hello", TrustLevel::Anonymous)).await;
         let events = collect_events(rx).await;
 
         let chunks: Vec<_> = events
@@ -536,7 +647,7 @@ mod tests {
     async fn error_turn_produces_error_event() {
         if !mock_available() { return; }
         let dispatcher = mock_dispatcher("error");
-        let rx = dispatcher.dispatch(make_request("dbus", "conv-2", "fail")).await;
+        let rx = dispatcher.dispatch(make_request("dbus", "conv-2", "fail", TrustLevel::Anonymous)).await;
         let events = collect_events(rx).await;
 
         let has_error = events.iter().any(|e| matches!(e, TurnEvent::Error(_)));
@@ -550,7 +661,7 @@ mod tests {
     async fn crash_produces_error_event() {
         if !mock_available() { return; }
         let dispatcher = mock_dispatcher("crash");
-        let rx = dispatcher.dispatch(make_request("dbus", "conv-3", "crash")).await;
+        let rx = dispatcher.dispatch(make_request("dbus", "conv-3", "crash", TrustLevel::Anonymous)).await;
         let events = collect_events(rx).await;
 
         let has_error = events.iter().any(|e| matches!(e, TurnEvent::Error(_)));
@@ -561,7 +672,7 @@ mod tests {
     async fn cancellation_kills_subprocess() {
         if !mock_available() { return; }
         let dispatcher = mock_dispatcher("slow");
-        let rx = dispatcher.dispatch(make_request("dbus", "conv-4", "slow")).await;
+        let rx = dispatcher.dispatch(make_request("dbus", "conv-4", "slow", TrustLevel::Anonymous)).await;
 
         // Drop the receiver immediately — should trigger cancellation.
         drop(rx);
@@ -580,13 +691,146 @@ mod tests {
         if !mock_available() { return; }
         let dispatcher = mock_dispatcher("normal");
 
-        let rx1 = dispatcher.dispatch(make_request("dbus", "conv-a", "one")).await;
-        let rx2 = dispatcher.dispatch(make_request("dbus", "conv-b", "two")).await;
+        let rx1 = dispatcher.dispatch(make_request("dbus", "conv-a", "one", TrustLevel::Anonymous)).await;
+        let rx2 = dispatcher.dispatch(make_request("dbus", "conv-b", "two", TrustLevel::Anonymous)).await;
 
         let (events1, events2) = tokio::join!(collect_events(rx1), collect_events(rx2));
 
         assert!(events1.iter().any(|e| matches!(e, TurnEvent::Complete(_))));
         assert!(events2.iter().any(|e| matches!(e, TurnEvent::Complete(_))));
+    }
+
+    /// Spin up a dispatcher in `argv` mock mode and run one turn at the
+    /// given trust level. Returns the captured argv (one entry per line)
+    /// the dispatcher actually passed to the companion subprocess.
+    ///
+    /// This is the regression guard for the channel-permissions fix —
+    /// it asserts that `--permission-mode dontAsk` and the right
+    /// per-tier `--settings` JSON literal land on the spawned process,
+    /// so a future refactor can't silently drop them.
+    async fn capture_dispatch_argv(trust: TrustLevel) -> Vec<String> {
+        let argv_path = std::env::temp_dir().join(format!(
+            "companion-argv-test-{}.txt",
+            uuid::Uuid::new_v4()
+        ));
+        let mut env = HashMap::new();
+        env.insert("MOCK_MODE".into(), "argv".into());
+        env.insert("MOCK_SESSION_ID".into(), "argv-test-session".into());
+        env.insert(
+            "MOCK_ARGV_FILE".into(),
+            argv_path.to_string_lossy().into_owned(),
+        );
+        let store = SessionStore::open_in_memory().unwrap();
+        let dispatcher = Dispatcher::with_command(store, mock_script(), env);
+        let rx = dispatcher
+            .dispatch(make_request("test", "argv-conv", "hi", trust))
+            .await;
+        // Drain to make sure the subprocess has actually run.
+        let _ = collect_events(rx).await;
+        let captured = std::fs::read_to_string(&argv_path)
+            .expect("argv file should exist after argv-mode mock ran");
+        let _ = std::fs::remove_file(&argv_path);
+        captured.lines().map(|s| s.to_string()).collect()
+    }
+
+    #[tokio::test]
+    async fn passes_permission_mode_and_settings_owner() {
+        if !mock_available() { return; }
+        let argv = capture_dispatch_argv(TrustLevel::Owner).await;
+
+        // --permission-mode dontAsk must be present, in that order.
+        let mode_idx = argv
+            .iter()
+            .position(|a| a == "--permission-mode")
+            .expect("--permission-mode must be in argv");
+        assert_eq!(
+            argv.get(mode_idx + 1).map(String::as_str),
+            Some("dontAsk"),
+            "--permission-mode must be followed by dontAsk"
+        );
+
+        // --settings must be present and followed by the OWNER literal.
+        let settings_idx = argv
+            .iter()
+            .position(|a| a == "--settings")
+            .expect("--settings must be in argv");
+        assert_eq!(
+            argv.get(settings_idx + 1).map(String::as_str),
+            Some(OWNER_SETTINGS_JSON),
+            "--settings must carry the owner JSON literal verbatim"
+        );
+
+        // The owner literal must allow the curated MCP namespaces.
+        assert!(
+            OWNER_SETTINGS_JSON.contains("mcp__axios-ai-mail__*"),
+            "owner settings must allow axios-ai-mail MCP tools"
+        );
+        assert!(
+            OWNER_SETTINGS_JSON.contains("mcp__mcp-dav__*"),
+            "owner settings must allow mcp-dav MCP tools"
+        );
+        assert!(
+            OWNER_SETTINGS_JSON.contains("mcp__sentinel__*"),
+            "owner settings must allow sentinel MCP tools"
+        );
+
+        // -p MUST stay terminal — no flag may follow it before --.
+        let p_idx = argv
+            .iter()
+            .position(|a| a == "-p")
+            .expect("-p must be in argv");
+        assert!(
+            settings_idx < p_idx,
+            "--settings must precede -p so the prompt body stays terminal"
+        );
+        assert!(
+            mode_idx < p_idx,
+            "--permission-mode must precede -p so the prompt body stays terminal"
+        );
+    }
+
+    #[tokio::test]
+    async fn passes_permission_mode_and_settings_anonymous() {
+        if !mock_available() { return; }
+        let argv = capture_dispatch_argv(TrustLevel::Anonymous).await;
+
+        let mode_idx = argv
+            .iter()
+            .position(|a| a == "--permission-mode")
+            .expect("--permission-mode must be in argv");
+        assert_eq!(
+            argv.get(mode_idx + 1).map(String::as_str),
+            Some("dontAsk"),
+            "--permission-mode must be followed by dontAsk"
+        );
+
+        let settings_idx = argv
+            .iter()
+            .position(|a| a == "--settings")
+            .expect("--settings must be in argv");
+        assert_eq!(
+            argv.get(settings_idx + 1).map(String::as_str),
+            Some(ANONYMOUS_SETTINGS_JSON),
+            "--settings must carry the anonymous JSON literal verbatim"
+        );
+
+        // Anonymous must DENY (not allow) the dangerous tool set.
+        assert!(
+            ANONYMOUS_SETTINGS_JSON.contains(r#""deny":["#),
+            "anonymous settings must use a deny list"
+        );
+        for tool in &[
+            "Bash", "Edit", "Write", "Read", "WebFetch", "WebSearch",
+            "mcp__axios-ai-mail__send_email",
+            "mcp__sentinel__reboot_host",
+            "mcp__mcp-dav__delete_contact",
+        ] {
+            assert!(
+                ANONYMOUS_SETTINGS_JSON.contains(tool),
+                "anonymous deny list must include {}",
+                tool
+            );
+        }
     }
 
     #[tokio::test]
@@ -604,7 +848,7 @@ mod tests {
         // makes channel-xmpp Phase 4.2 streaming actually visible to users.
         if !mock_available() { return; }
         let dispatcher = mock_dispatcher("partial");
-        let rx = dispatcher.dispatch(make_request("dbus", "conv-partial", "stream please")).await;
+        let rx = dispatcher.dispatch(make_request("dbus", "conv-partial", "stream please", TrustLevel::Anonymous)).await;
         let events = collect_events(rx).await;
 
         let chunks: Vec<_> = events

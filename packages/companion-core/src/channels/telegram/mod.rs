@@ -12,7 +12,7 @@ use teloxide::types::{MediaKind, MessageKind};
 use tokio::sync::Notify;
 use tracing::{debug, error, info, warn};
 
-use crate::dispatcher::{Dispatcher, TurnEvent, TurnRequest};
+use crate::dispatcher::{Dispatcher, TrustLevel, TurnEvent, TurnRequest};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -342,10 +342,16 @@ async fn handle_message(
         debug!(%e, "failed to send typing indicator");
     }
 
+    // Telegram trust = Owner. The sender already passed `is_allowed`
+    // (allowed_users UserId allowlist) above, so they're a verified
+    // owner identity. Owner trust grants the curated MCP allowlist on
+    // top of Keith's user-level allow rules — see TrustLevel::Owner
+    // in dispatcher.rs.
     let turn_req = TurnRequest {
         surface_id: "telegram".into(),
         conversation_id,
         message_text: text.clone(),
+        trust: TrustLevel::Owner,
     };
 
     let mut rx = dispatcher.dispatch(turn_req).await;

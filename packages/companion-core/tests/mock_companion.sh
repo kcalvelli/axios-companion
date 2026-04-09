@@ -11,6 +11,11 @@
 #              assistant event (which the dispatcher must dedupe against the
 #              streamed deltas) + result/success. Mimics real claude with
 #              --include-partial-messages.
+#   argv     — like normal, but FIRST writes the full received argv
+#              (one arg per line, NUL-separator unsafe but fine for tests)
+#              to $MOCK_ARGV_FILE. Used by the trust-level regression
+#              tests to assert the dispatcher passed --permission-mode
+#              dontAsk and the right --settings JSON.
 
 MODE="${MOCK_MODE:-normal}"
 SESSION_ID="${MOCK_SESSION_ID:-deadbeef-1234-5678-9abc-def012345678}"
@@ -34,6 +39,17 @@ case "$MODE" in
     echo '{"type":"assistant","message":{"content":[{"text":"thinking..."}]}}'
     sleep 2
     echo '{"type":"result","subtype":"success","result":"thinking..."}'
+    ;;
+  argv)
+    if [ -n "$MOCK_ARGV_FILE" ]; then
+      : > "$MOCK_ARGV_FILE"
+      for a in "$@"; do
+        printf '%s\n' "$a" >> "$MOCK_ARGV_FILE"
+      done
+    fi
+    echo '{"type":"system","subtype":"init","session_id":"'"$SESSION_ID"'","model":"claude-sonnet-4-20250514"}'
+    echo '{"type":"assistant","message":{"content":[{"text":"argv mock"}]}}'
+    echo '{"type":"result","subtype":"success","result":"argv mock"}'
     ;;
   partial)
     echo '{"type":"system","subtype":"init","session_id":"'"$SESSION_ID"'","model":"claude-sonnet-4-20250514"}'
