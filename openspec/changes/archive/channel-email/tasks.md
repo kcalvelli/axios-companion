@@ -74,16 +74,16 @@ The adapter assumes it owns the configured mailbox exclusively. If something els
 
 - [x] **9.1** README channel adapters section updated with the email block, configuration example, and email-specific notes.
 - [x] **9.2** Proposal + tasks fleshed out (this document).
-- [ ] **9.3** Operator-side: provision a dedicated bot mailbox on the IMAP/SMTP server, store its password in a single-line file readable by the user the daemon runs as (agenix is the canonical mechanism on axios), and set `services.axios-companion.channels.email` in home-manager. Confirm nothing else is polling the same mailbox before enabling.
-- [ ] **9.4** Live test, allowlisted sender: send a mail to the bot from an address in `allowedSenders`. Expect a threaded reply within `pollIntervalSecs` seconds, rendered as an in-thread reply (not a new thread) by the sending mail client.
-- [ ] **9.5** Live test, multi-turn in same thread: reply to the bot's reply. Expect the same Claude session continued; `journalctl --user -u companion-core` should show `resume=<uuid>` on the second turn.
-- [ ] **9.6** Live test, parallel threads: send a second mail with a different subject. Expect a new Claude session — verify with `sqlite3 ~/.local/share/axios-companion/sessions.db "select surface, conversation_id, claude_session_id from sessions where surface = 'email'"` that two rows exist with different `conversation_id` and `claude_session_id` values.
-- [ ] **9.7** Live test, anonymous sender: from an address NOT in `allowedSenders`, send a mail. Expect a reply at `TrustLevel::Anonymous` with no tool calls; `journalctl` should show `trust=Anonymous`.
-- [ ] **9.8** Live test, auto-loop: send a mail with `Auto-Submitted: auto-replied`. Expect no reply; log shows `dropping auto-submitted message`.
-- [ ] **9.9** Live test, bang command: send `!status` from an allowlisted address. Expect the status line reply, not a dispatched turn.
-- [ ] **9.10** Sent folder check: confirm outbound replies appear in the server's Sent folder.
-- [ ] **9.11** ROADMAP.md flipped: `channel-email` marked `[x]` with shipped-on date and archived-path link.
-- [ ] **9.12** Archive: `mv openspec/changes/channel-email openspec/changes/archive/channel-email`.
+- [x] **9.3** Operator-side: provision a dedicated bot mailbox on the IMAP/SMTP server, store its password in a single-line file readable by the user the daemon runs as (agenix is the canonical mechanism on axios), and set `services.axios-companion.channels.email` in home-manager. Confirm nothing else is polling the same mailbox before enabling.
+- [x] **9.4** Live test, allowlisted sender: send a mail to the bot from an address in `allowedSenders`. Expect a threaded reply within `pollIntervalSecs` seconds, rendered as an in-thread reply (not a new thread) by the sending mail client.
+- [x] **9.5** Live test, multi-turn in same thread: reply to the bot's reply. Expect the same Claude session continued; `journalctl --user -u companion-core` should show `resume=<uuid>` on the second turn.
+- [x] **9.6** Live test, parallel threads: send a second mail with a different subject. Expect a new Claude session — verify with `sqlite3 ~/.local/share/axios-companion/sessions.db "select surface, conversation_id, claude_session_id from sessions where surface = 'email'"` that two rows exist with different `conversation_id` and `claude_session_id` values.
+- [x] **9.7** Live test, anonymous sender: from an address NOT in `allowedSenders`, send a mail. Expect a reply at `TrustLevel::Anonymous` with no tool calls; `journalctl` should show `trust=Anonymous`.
+- [x] **9.8** Live test, auto-loop: send a mail with `Auto-Submitted: auto-replied`. Expect no reply; log shows `dropping auto-submitted message`.
+- [x] **9.9** Live test, bang command: send `!status` from an allowlisted address. Expect the status line reply, not a dispatched turn.
+- [x] **9.10** Sent folder check: confirm outbound replies appear in the server's Sent folder.
+- [x] **9.11** ROADMAP.md flipped: `channel-email` marked `[x]` with shipped-on date and archived-path link.
+- [x] **9.12** Archive: `mv openspec/changes/channel-email openspec/changes/archive/channel-email`.
 
 ## Decisions deferred to follow-up
 
