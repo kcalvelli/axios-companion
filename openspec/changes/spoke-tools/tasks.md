@@ -121,12 +121,21 @@ edge's home-manager config, not in shared user config files.
 
 ## Phase 4: `journal`
 
-- [ ] **4.1** `src/bin/journal.rs` with one tool `journal_read` taking
-  `unit` (optional), `since` (optional), `lines` (optional, default 100,
-  max 1000).
-- [ ] **4.2** Shell out to `journalctl --user` with appropriate flags.
-- [ ] **4.3** Home-manager wiring.
-- [ ] **4.4** Live test.
+- [x] **4.1** `src/bin/journal.rs` with one tool `journal_read` —
+  `unit` (optional), `since` (optional, any `journalctl --since` value),
+  `lines` (optional, default 100, max 1000, clamped server-side).
+- [x] **4.2** Shells out to `journalctl --user --no-pager
+  --output=short -n <lines> [-u <unit>] [--since <value>]`. Capture
+  via `.output()`, UTF-8-decode, hand back as `ok_text`. Empty-result
+  case ("no matching journal lines") handled explicitly.
+- [x] **4.3** `default.nix`: `systemd` joins buildInputs,
+  `companion-mcp-journal` wrapped with `systemd/bin` on PATH.
+  Home-manager gets `spoke.tools.journal.enable` + auto-registration
+  as `services.mcp-gateway.servers.companion-journal`.
+- [x] **4.4** Live stdio smoke on edge: `journal_read {unit:
+  "companion-core", lines: 3}` returned three real turn-complete
+  lines from the companion-core user unit. Full mcp-gateway path
+  pending Keith's rebuild.
 
 ## Phase 5: `apps`
 

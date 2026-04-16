@@ -248,6 +248,13 @@ in
         via wl-paste and wl-copy. Text only for this phase. Runs on
         the mcp-gateway host — reads/writes that host's clipboard
       '';
+
+      tools.journal.enable = lib.mkEnableOption ''
+        the `journal` tool — read lines from the user's systemd
+        journal (journalctl --user), optionally filtered by unit or
+        --since window. Read-only. Runs on the mcp-gateway host —
+        reads that host's user journal
+      '';
     };
 
     channels.telegram = {
@@ -761,6 +768,13 @@ in
       services.mcp-gateway.servers.companion-clipboard = {
         enable = true;
         command = "${cfg.spoke.package}/bin/companion-mcp-clipboard";
+      };
+    })
+
+    (lib.mkIf (cfg.spoke.enable && cfg.spoke.tools.journal.enable) {
+      services.mcp-gateway.servers.companion-journal = {
+        enable = true;
+        command = "${cfg.spoke.package}/bin/companion-mcp-journal";
       };
     })
   ]);

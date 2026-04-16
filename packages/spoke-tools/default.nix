@@ -17,6 +17,7 @@
   libnotify,
   grim,
   wl-clipboard,
+  systemd,
 }:
 rustPlatform.buildRustPackage {
   pname = "companion-spoke-tools";
@@ -32,12 +33,14 @@ rustPlatform.buildRustPackage {
   #   libnotify    → notify-send  (notify)
   #   grim         → screen capture (screenshot)
   #   wl-clipboard → wl-copy / wl-paste (clipboard)
+  #   systemd      → journalctl (journal)
   # Each tool's runtime PATH is wrapped below so the shell-out resolves
   # regardless of the mcp-gateway unit's inherited PATH.
   buildInputs = [
     libnotify
     grim
     wl-clipboard
+    systemd
   ];
 
   postInstall = ''
@@ -49,6 +52,9 @@ rustPlatform.buildRustPackage {
 
     wrapProgram $out/bin/companion-mcp-clipboard \
       --prefix PATH : ${lib.makeBinPath [ wl-clipboard ]}
+
+    wrapProgram $out/bin/companion-mcp-journal \
+      --prefix PATH : ${lib.makeBinPath [ systemd ]}
   '';
 
   meta = {
