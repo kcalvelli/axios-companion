@@ -242,7 +242,46 @@ edge's home-manager config, not in shared user config files.
 
 ## Phase 8: paperwork
 
-- [ ] **8.1** Flip ROADMAP `spoke-tools` from `[ ]` to `[x]` with
-  shipped date.
-- [ ] **8.2** Archive: `mv openspec/changes/spoke-tools
+- [x] **8.1** ROADMAP `spoke-tools` flipped to `[x]` with shipped
+  date 2026-04-16. One-line summary of the seven tools and the
+  central-gateway caveat.
+- [x] **8.2** `git mv openspec/changes/spoke-tools
   openspec/changes/archive/spoke-tools`.
+
+## Lessons worth keeping
+
+In order of appearance, the non-obvious gotchas this change forced
+into the open. Future tool commits should check against these:
+
+- **Forked helpers inherit stdio.** wl-copy, xdg-open, and anything
+  else that daemonizes will keep the MCP server's JSON-RPC pipe
+  open past our exit unless we `stdout/stderr → null` the spawn
+  explicitly. Bit clipboard first, reflex now.
+- **Tool selection is a persona problem, not a tool problem.** Sid
+  picked sentinel's view_logs over our journal tool because the
+  former had longer-established "logs" energy. Fixed with beefier
+  tool descriptions + a "system-scope vs user-scope" rule in
+  context.md. Same pattern will repeat for any new spoke tool that
+  overlaps an older tool's surface.
+- **Don't pre-verify with Bash.** Sid's reflex to `which ghostty`
+  before calling launch_desktop_entry burned a live test because
+  claude-code's built-in Bash has a different PATH from dex's
+  search. Added to context.md: call the companion-* tool first,
+  let it report missing targets authoritatively.
+- **mcp-gateway's systemd environment is narrow.** No XDG_DATA_DIRS,
+  no USER, no session env. Tools that need those must either
+  inherit from $HOME (derive USER from HOME's basename) or
+  build the env themselves at runtime.
+- **dex -a is --autostart, not name lookup.** Read the man page,
+  not the shape of the flag.
+- **Allowlist is the gate, PATH is not.** For the shell tool, the
+  inspection toolkit (coreutils, git, grep, ripgrep, procps, file,
+  which) is baked into the binary's wrapped PATH so the allowlist
+  and the reachable set agree. Mismatches between allowlist and
+  PATH produce confusing ENOENT errors that look like allowlist
+  rejections to a non-careful reader (including Sid).
+- **Tier 2 central-gateway limitation.** Every spoke tool runs on
+  whichever host mcp-gateway runs on (edge, in Keith's fleet).
+  "Take a screenshot from pangolin" describes edge's screen, not
+  pangolin's. That's a distributed-routing concern; not a
+  spoke-tools bug. Revisit when pangolin travel becomes common.

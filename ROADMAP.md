@@ -34,7 +34,7 @@ Work proceeds roughly top-to-bottom. Items at the same level can be built in par
 
 ### Tier 2 — Distributed agency
 
-- [ ] **[spoke-tools](./openspec/changes/spoke-tools/)** — MCP tool servers exposing local machine capabilities (shell, apps, screenshot, clipboard, notify, journal, niri) via mcp-gateway. *Depends on: bootstrap. Standalone-useful even without distributed-routing.*
+- [x] **[spoke-tools](./openspec/changes/archive/spoke-tools/)** — MCP tool servers exposing local machine capabilities via mcp-gateway. Shipped 2026-04-16. Seven binaries in one cargo package (notify, screenshot, clipboard, journal, apps, niri, shell), hand-rolled JSON-RPC MCP stdio shell (no SDK crate), each registered as a `services.mcp-gateway.servers.companion-<tool>` via home-manager. Shell tool has allowlist-enforced execution with per-invocation audit logging to the user journal. Central-gateway caveat: all tools execute on whichever host runs mcp-gateway (edge in Keith's fleet), regardless of which host the caller sat at — distributed-routing is the fix when that becomes painful. Verified end-to-end on edge: notify fires, screenshot returns multimodal PNGs Sid describes accurately, clipboard round-trips, journal reads user units, apps launches URLs and .desktop entries, niri moves windows/workspaces, shell executes allowlisted commands with audit trail. *Depends on: bootstrap. Standalone-useful even without distributed-routing.*
 - [ ] **[distributed-routing](./openspec/changes/distributed-routing/)** — Hub daemon learns to route tool calls to multiple spokes over Tailscale with active-spoke presence tracking. *Depends on: bootstrap, daemon-core, spoke-tools, cli-client*
 
 ### Optional polish
