@@ -2,13 +2,16 @@
 //!
 //! Two thin shell-outs:
 //!   `open_url`              → xdg-open <url>
-//!   `launch_desktop_entry`  → dex -a <name>
+//!   `launch_desktop_entry`  → find <name>.desktop in XDG dirs, then
+//!                             dex <path>
 //!
 //! Using `dex` rather than `gtk-launch` because gtk-launch only ships
 //! inside the full gtk3 package (≈30 MB runtime closure for one
-//! binary). `dex` is a tiny purpose-built freedesktop launcher that
-//! also supports `-a <name>` for name-based lookup without the user
-//! having to know the .desktop filename.
+//! binary). `dex` is a tiny freedesktop launcher — but it only accepts
+//! positional .desktop file paths; its `-a` flag is `--autostart`,
+//! not "look up by name." So this tool walks the XDG applications
+//! dirs itself to resolve the name to a path before handing it to
+//! dex.
 //!
 //! Both tools are fire-and-forget. The tool returns as soon as the
 //! launcher spawns the child; it does not wait for the application
@@ -49,11 +52,16 @@ impl ToolHandler for Apps {
             ),
             tool_def(
                 "launch_desktop_entry",
-                "Launch a `.desktop` application entry by name (dex -a). \
-                 Pass just the entry name — dex resolves it via the \
-                 freedesktop XDG data dirs (~/.local/share/applications \
-                 and /usr/share/applications). Fire-and-forget. Runs on \
-                 the mcp-gateway host.",
+                "Launch a `.desktop` application entry by name. The tool \
+                 walks the XDG applications dirs (~/.local/share/applications, \
+                 ~/.nix-profile/share/applications, \
+                 /etc/profiles/per-user/$USER/share/applications, \
+                 /run/current-system/sw/share/applications) to find \
+                 `<name>.desktop`, then hands it to dex to execute. \
+                 Fire-and-forget. Runs on the mcp-gateway host. On NixOS, \
+                 entry names are usually the reverse-DNS app ID \
+                 (com.mitchellh.ghostty, org.mozilla.firefox) — not the \
+                 bare binary name.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -113,13 +121,31 @@ async fn launch_desktop_entry(args: &Value) -> Value {
         Some(s) if !s.is_empty() => s,
         _ => return err_text("name is required and must be non-empty"),
     };
-
-    // dex accepts either the bare name (with `-a`) or a full .desktop
-    // path. Strip the suffix if Claude provided it so either form works.
     let entry = name.strip_suffix(".desktop").unwrap_or(name);
 
+    // dex is a launcher, not a finder. Its `-a` flag means --autostart
+    // (run every entry in ~/.config/autostart/), NOT "look up by name"
+    // — learned that the hard way when the first live test fired Solaar
+    // five times and never touched Ghostty. So: resolve the .desktop
+    // path ourselves by walking the XDG applications dirs, then hand
+    // the full path to dex as a positional arg.
+    let desktop_path = match find_desktop_file(entry) {
+        Some(p) => p,
+        None => {
+            return err_text(format!(
+                "no .desktop entry found for \"{entry}\". Searched: {}. \
+                 Did you mean a different entry name? Entries on NixOS \
+                 are usually the reverse-DNS app ID (com.mitchellh.ghostty, \
+                 org.mozilla.firefox) — tab-complete in a file manager \
+                 on ~/.local/share/applications/ or check \
+                 /etc/profiles/per-user/$USER/share/applications/.",
+                application_dirs().join(", ")
+            ));
+        }
+    };
+
     let status = match tokio::process::Command::new("dex")
-        .args(["-a", entry])
+        .arg(&desktop_path)
         .env("XDG_DATA_DIRS", nixos_xdg_data_dirs())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -133,15 +159,38 @@ async fn launch_desktop_entry(args: &Value) -> Value {
 
     if !status.success() {
         return err_text(format!(
-            "dex could not launch \"{entry}\" (exit {}). \
-             Check the entry name — dex looks for .desktop files in the \
-             user's local applications dir and NixOS's per-user / system \
-             profile share dirs.",
+            "dex could not launch \"{entry}\" from {desktop_path} (exit {}). \
+             The .desktop file resolved but execution failed.",
             status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into())
         ));
     }
 
     ok_text(format!("Launched {entry}."))
+}
+
+/// Build the list of applications directories to search — same set
+/// as [`nixos_xdg_data_dirs`] but each with `/applications` appended,
+/// which is where freedesktop says desktop entries live.
+fn application_dirs() -> Vec<String> {
+    nixos_xdg_data_dirs()
+        .split(':')
+        .filter(|s| !s.is_empty())
+        .map(|d| format!("{d}/applications"))
+        .collect()
+}
+
+/// Look up `<name>.desktop` in the standard applications directories
+/// and return the first hit's full path. Mirrors how gtk-launch does
+/// its XDG lookup, without needing the 30 MB gtk3 closure.
+fn find_desktop_file(name: &str) -> Option<String> {
+    let filename = format!("{name}.desktop");
+    for dir in application_dirs() {
+        let candidate = format!("{dir}/{filename}");
+        if std::path::Path::new(&candidate).is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// Build an `XDG_DATA_DIRS` value that covers the NixOS canonical
@@ -173,7 +222,7 @@ fn nixos_xdg_data_dirs() -> String {
     }
 
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-    let user = std::env::var("USER").unwrap_or_else(|_| "root".into());
+    let user = resolve_username(&home);
 
     [
         format!("{home}/.local/share"),
@@ -184,6 +233,35 @@ fn nixos_xdg_data_dirs() -> String {
         "/usr/share".to_string(),
     ]
     .join(":")
+}
+
+/// Resolve the current user's name without any new crate dependencies.
+///
+/// `$USER` is reliable inside login shells and user-scope systemd
+/// units, but systemd does NOT set `$USER` in Environment= for a
+/// system-scope service running with `User=keith` — which is exactly
+/// how mcp-gateway runs. Without this fallback, [`nixos_xdg_data_dirs`]
+/// would build `/etc/profiles/per-user/root/share`, which doesn't
+/// exist, and dex would never see user-installed desktop entries.
+///
+/// Fallback strategy: derive from `$HOME`'s basename. Linux layout
+/// convention is `/home/<user>` for normal accounts and `/root` for
+/// root, which covers every case we care about on NixOS. If `$HOME`
+/// doesn't look like either, fall back to `"root"` — a bad guess is
+/// better than a panic, and the resulting path just harmlessly
+/// misses in the applications-dir search.
+fn resolve_username(home: &str) -> String {
+    if let Ok(user) = std::env::var("USER") {
+        if !user.is_empty() {
+            return user;
+        }
+    }
+
+    std::path::Path::new(home)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "root".into())
 }
 
 #[tokio::main(flavor = "current_thread")]
