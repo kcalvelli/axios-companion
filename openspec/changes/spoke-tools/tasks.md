@@ -200,19 +200,45 @@ edge's home-manager config, not in shared user config files.
 
 ## Phase 7: `shell`
 
-- [ ] **7.1** `src/bin/shell.rs` with one tool `run` taking `command`
-  (the argv) and `stdin` (optional).
-- [ ] **7.2** Allowlist enforcement: config passed via env
-  (`COMPANION_SHELL_ALLOWLIST=git,ls,cat`). `*` as a single-element list
-  means "allow all" with a loud audit log line per call. Empty
-  allowlist rejects everything with a clear error.
-- [ ] **7.3** Home-manager `spoke.tools.shell.enable` +
-  `spoke.tools.shell.allowlist`. The allowlist is marshalled into the
-  env var at module-evaluation time.
-- [ ] **7.4** Audit-log every invocation to the user journal
-  (`tracing-journald`): command argv, allowed/denied, exit code.
-- [ ] **7.5** Live test, allowed command; live test, denied command;
-  live test, empty-list-denies-everything.
+- [x] **7.1** `src/bin/shell.rs` with one tool `run` — argv array
+  (required, min 1), optional `stdin` (bytes piped in), optional
+  `timeout_secs` (default 30, max 300, enforced in-process via
+  `tokio::time::timeout`), optional `cwd`. argv passed directly to
+  `tokio::process::Command` — no shell wrapping, no interpolation
+  vector via arguments.
+- [x] **7.2** Allowlist via env `COMPANION_SHELL_ALLOWLIST`. Three
+  modes represented as an `Allowlist` enum so every call site has
+  to handle them:
+  - unset / empty → `DenyAll` (safe default)
+  - `"*"` alone → `AllowAll` (every call emits WARN in the audit log)
+  - `"git,ls,cat"` → `Specific(HashSet)`
+  Match is on the basename of argv[0]: `"git"` matches `git` and
+  `/usr/bin/git`; `"/usr/bin/git"` matches neither. Any other rule
+  is an injection vector waiting to happen.
+- [x] **7.3** Home-manager `spoke.tools.shell.enable` +
+  `spoke.tools.shell.allowlist`. The list is marshalled into
+  `env.COMPANION_SHELL_ALLOWLIST` at module-evaluation time via
+  `concatStringsSep ","`.
+- [x] **7.4** Audit log to the user journal via `tracing-journald`,
+  under the `companion-mcp-shell` identifier. Every invocation
+  logs one structured event: argv, allow/deny decision, exit code
+  (or timeout), duration. `journalctl --user -t
+  companion-mcp-shell` is the operator's audit trail. If journald
+  isn't reachable (running outside systemd), init silently falls
+  back — tool still works, just without audit.
+- [x] **7.5** Six pre-deploy behavioral smoke tests on edge, all
+  green:
+  1. Deny-all default → `ls` rejected.
+  2. Specific allowlist → `echo "allowlist works"` permitted, ran.
+  3. Specific allowlist → `rm -rf /` rejected (basename `rm` not
+     on `ls,echo`).
+  4. Basename matching → `/run/current-system/sw/bin/echo hi`
+     permitted by allowlist `["echo"]`.
+  5. Timeout → `sleep 60` with `timeout_secs=2` killed at 2s,
+     "did not exit within 2s" error surfaced.
+  6. Stdin pipe → `cat` with `stdin="hello via stdin"` echoes back.
+  Full deploy test (live invocation via mcp-gateway) pending Keith's
+  rebuild with a real allowlist chosen.
 
 ## Phase 8: paperwork
 

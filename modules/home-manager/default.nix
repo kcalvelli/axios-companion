@@ -270,6 +270,42 @@ in
         niri_focus_workspace, niri_close_focused, niri_spawn) perform
         compositor actions. Runs on the mcp-gateway host
       '';
+
+      tools.shell = {
+        enable = lib.mkEnableOption ''
+          the `shell` tool — allowlisted shell command execution on
+          the mcp-gateway host. Highest-blast-radius spoke tool;
+          every invocation is audit-logged to the user journal
+          (`journalctl --user -t companion-mcp-shell`).
+
+          The allowlist is mandatory — an empty list denies every
+          command. Use `["*"]` to allow everything (every call is
+          audit-logged at WARN)
+        '';
+
+        allowlist = lib.mkOption {
+          type = lib.types.listOf lib.types.str;
+          default = [ ];
+          description = ''
+            List of commands Sid may run via the shell tool. Matched
+            against the basename of argv[0] — `"git"` allows
+            `/usr/bin/git` and plain `git` equally; `"/usr/bin/git"`
+            matches neither, because the match is on basename only.
+
+            An empty list (the default) denies every command.
+            `["*"]` allows every command and logs every call loudly.
+            Anything else is the exact set of allowed basenames.
+          '';
+          example = [
+            "git"
+            "ls"
+            "cat"
+            "grep"
+            "rg"
+            "systemctl"
+          ];
+        };
+      };
     };
 
     channels.telegram = {
@@ -804,6 +840,17 @@ in
       services.mcp-gateway.servers.companion-niri = {
         enable = true;
         command = "${cfg.spoke.package}/bin/companion-mcp-niri";
+      };
+    })
+
+    (lib.mkIf (cfg.spoke.enable && cfg.spoke.tools.shell.enable) {
+      services.mcp-gateway.servers.companion-shell = {
+        enable = true;
+        command = "${cfg.spoke.package}/bin/companion-mcp-shell";
+        # Marshal the Nix list into a comma-separated env string at
+        # module-evaluation time. Empty list → empty env var → deny-all.
+        # ["*"] → "*" → allow-all (LOUD).
+        env.COMPANION_SHELL_ALLOWLIST = lib.concatStringsSep "," cfg.spoke.tools.shell.allowlist;
       };
     })
   ]);

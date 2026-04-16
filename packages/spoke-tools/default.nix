@@ -40,6 +40,11 @@ rustPlatform.buildRustPackage {
   #   xdg-utils    → xdg-open                (apps: open_url)
   #   dex          → desktop-entry launcher  (apps: launch_desktop_entry)
   #   niri         → compositor IPC          (niri: all tools)
+  # The `shell` tool has no bundled runtime deps — it spawns whatever
+  # the operator's allowlist permits, directly from the process's
+  # inherited PATH. That's the correct behavior for an allowlisted
+  # command runner: the allowlist is the gate, PATH is just how the
+  # binary gets found.
   # Each tool's runtime PATH is wrapped below so the shell-out resolves
   # regardless of the mcp-gateway unit's inherited PATH.
   buildInputs = [
