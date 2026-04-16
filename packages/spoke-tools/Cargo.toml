@@ -33,6 +33,10 @@ path = "src/bin/journal.rs"
 name = "companion-mcp-apps"
 path = "src/bin/apps.rs"
 
+[[bin]]
+name = "companion-mcp-niri"
+path = "src/bin/niri.rs"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

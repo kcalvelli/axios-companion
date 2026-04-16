@@ -150,20 +150,53 @@ edge's home-manager config, not in shared user config files.
 - [x] **5.3** Home-manager gets `spoke.tools.apps.enable` +
   auto-registration as `companion-apps`. `xdg-utils` and `dex`
   added to buildInputs and wrapped onto the apps binary's PATH.
-- [x] **5.4** Pre-deploy stdio smoke: tools/list returns both
-  descriptors, bad-entry call returns a clear actionable error with
-  `isError: true`. Happy-path (real URL, real app) pending Keith's
-  rebuild + live test.
+- [x] **5.4** Live tests on edge 2026-04-16:
+  - `companion "open https://nixos.org in my browser"` → browser
+    tab opened. Clean.
+  - `companion "launch com.mitchellh.ghostty"` → Ghostty spawned,
+    Sid confirmed "Launched. Whatever."
+  - Two bugs caught during the live test, both fixed in follow-up
+    commits (929a51b, d28bdb0):
+    1. mcp-gateway's systemd unit has no `XDG_DATA_DIRS`, so dex
+       saw only freedesktop-default paths and missed NixOS per-user
+       and system profile share dirs. Fixed by constructing
+       XDG_DATA_DIRS in the tool at runtime from $HOME, $USER,
+       /etc/profiles/per-user/, /run/current-system/sw/share.
+    2. `dex -a` is `--autostart` (runs every ~/.config/autostart/
+       entry), not name-based lookup — I misread the flag. First
+       live test fired Solaar repeatedly because Solaar was in
+       autostart. Fixed by doing the XDG name-to-path resolution
+       in Rust (~20 lines, no new deps) and passing the full
+       .desktop path to dex as a positional arg (its actual
+       contract). Also fixed a secondary bug where systemd
+       doesn't set $USER for system services running as a user,
+       so the per-user path resolved to `/etc/profiles/per-user/root/`
+       — now falls back to deriving username from $HOME's basename.
 
 ## Phase 6: `niri`
 
-- [ ] **6.1** `src/bin/niri.rs` with tools covering the useful subset of
-  `niri msg`: `focus_window`, `spawn`, `focus_workspace`,
-  `list_windows`, `list_workspaces`.
-- [ ] **6.2** Each tool shells out to `niri msg <subcommand> --json`
-  and returns structured output.
-- [ ] **6.3** Home-manager wiring.
-- [ ] **6.4** Live test: spawn a terminal, switch workspace, focus back.
+- [x] **6.1** `src/bin/niri.rs` with seven tools covering both the
+  read and write halves of `niri msg`:
+  - Read: `niri_windows`, `niri_workspaces`, `niri_focused_window`
+    (returns Niri's native JSON; Claude parses directly, no
+    double-serialization tax).
+  - Write: `niri_focus_window(id)`, `niri_focus_workspace(reference)`
+    (index OR name, Niri accepts both), `niri_close_focused`,
+    `niri_spawn(command)` (argv array).
+- [x] **6.2** Read path shells `niri msg --json <subcommand>`; write
+  path shells `niri msg action <subcommand> [args]`. Shared helpers
+  `niri_json()` and `niri_action()` keep each tool ~3 lines.
+- [x] **6.3** `default.nix`: `niri` added to buildInputs, the niri
+  binary gets its own wrapProgram with niri/bin on PATH.
+  Home-manager gets `spoke.tools.niri.enable` + auto-registration
+  as `services.mcp-gateway.servers.companion-niri`.
+- [x] **6.4** Pre-deploy stdio smoke on edge: `niri_workspaces`
+  returned real workspace list (3 workspaces on DP-2), `niri_focused_window`
+  correctly identified the ghostty window hosting this very
+  conversation (title: "⠂ Resume development after rebranding from
+  axios to cairn"). Write-path tests (focus / spawn / close) pending
+  Keith's rebuild — skipped from the pre-deploy smoke because they
+  have visible side effects on an active session.
 
 ## Phase 7: `shell`
 

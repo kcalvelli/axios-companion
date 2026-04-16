@@ -20,6 +20,7 @@
   systemd,
   xdg-utils,
   dex,
+  niri,
 }:
 rustPlatform.buildRustPackage {
   pname = "companion-spoke-tools";
@@ -38,6 +39,7 @@ rustPlatform.buildRustPackage {
   #   systemd      → journalctl / systemctl  (journal)
   #   xdg-utils    → xdg-open                (apps: open_url)
   #   dex          → desktop-entry launcher  (apps: launch_desktop_entry)
+  #   niri         → compositor IPC          (niri: all tools)
   # Each tool's runtime PATH is wrapped below so the shell-out resolves
   # regardless of the mcp-gateway unit's inherited PATH.
   buildInputs = [
@@ -47,6 +49,7 @@ rustPlatform.buildRustPackage {
     systemd
     xdg-utils
     dex
+    niri
   ];
 
   postInstall = ''
@@ -64,6 +67,9 @@ rustPlatform.buildRustPackage {
 
     wrapProgram $out/bin/companion-mcp-apps \
       --prefix PATH : ${lib.makeBinPath [ xdg-utils dex ]}
+
+    wrapProgram $out/bin/companion-mcp-niri \
+      --prefix PATH : ${lib.makeBinPath [ niri ]}
   '';
 
   meta = {

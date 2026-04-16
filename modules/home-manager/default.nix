@@ -262,6 +262,14 @@ in
         host, so the browser / app opens on THAT host's display,
         not the caller's
       '';
+
+      tools.niri.enable = lib.mkEnableOption ''
+        the `niri` tool — control the Niri compositor via `niri msg`.
+        Read tools (niri_windows, niri_workspaces, niri_focused_window)
+        return Niri's native JSON; write tools (niri_focus_window,
+        niri_focus_workspace, niri_close_focused, niri_spawn) perform
+        compositor actions. Runs on the mcp-gateway host
+      '';
     };
 
     channels.telegram = {
@@ -789,6 +797,13 @@ in
       services.mcp-gateway.servers.companion-apps = {
         enable = true;
         command = "${cfg.spoke.package}/bin/companion-mcp-apps";
+      };
+    })
+
+    (lib.mkIf (cfg.spoke.enable && cfg.spoke.tools.niri.enable) {
+      services.mcp-gateway.servers.companion-niri = {
+        enable = true;
+        command = "${cfg.spoke.package}/bin/companion-mcp-niri";
       };
     })
   ]);
