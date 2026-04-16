@@ -242,6 +242,12 @@ in
         clients can describe or reason about what's on screen. Runs
         on the mcp-gateway host — captures that host's display
       '';
+
+      tools.clipboard.enable = lib.mkEnableOption ''
+        the `clipboard` tool — read and write the Wayland clipboard
+        via wl-paste and wl-copy. Text only for this phase. Runs on
+        the mcp-gateway host — reads/writes that host's clipboard
+      '';
     };
 
     channels.telegram = {
@@ -748,6 +754,13 @@ in
       services.mcp-gateway.servers.companion-screenshot = {
         enable = true;
         command = "${cfg.spoke.package}/bin/companion-mcp-screenshot";
+      };
+    })
+
+    (lib.mkIf (cfg.spoke.enable && cfg.spoke.tools.clipboard.enable) {
+      services.mcp-gateway.servers.companion-clipboard = {
+        enable = true;
+        command = "${cfg.spoke.package}/bin/companion-mcp-clipboard";
       };
     })
   ]);

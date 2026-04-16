@@ -98,11 +98,26 @@ edge's home-manager config, not in shared user config files.
 
 ## Phase 3: `clipboard`
 
-- [ ] **3.1** `src/bin/clipboard.rs` with `clipboard_read`,
-  `clipboard_write`.
-- [ ] **3.2** `wl-copy` / `wl-paste` via `wl-clipboard`.
-- [ ] **3.3** Home-manager wiring.
-- [ ] **3.4** Live test: write then read.
+- [x] **3.1** `src/bin/clipboard.rs` with `clipboard_read` (no args,
+  returns current text) and `clipboard_write` (`text` required).
+- [x] **3.2** Read: shell out to `wl-paste -n` (strip trailing
+  newline). Empty-clipboard / non-text-payload stderr ("No selection"
+  / "No suitable type") surfaces as an empty `ok_text("")` rather
+  than an error — "nothing to read" is a valid state.
+  Write: spawn `wl-copy` with `stdin=piped, stdout=null, stderr=null`,
+  write text to stdin, drop to close pipe, wait for exit. **The null
+  redirection on stdout/stderr matters**: wl-copy forks a daemon to
+  hold the selection in the background; without the redirection that
+  forked daemon inherits the MCP server's JSON-RPC pipe and keeps
+  the write end open past our exit, so downstream readers (including
+  mcp-gateway) never see EOF and hang.
+- [x] **3.3** Home-manager `spoke.tools.clipboard.enable` +
+  auto-registration as `services.mcp-gateway.servers.companion-clipboard`.
+  `wl-clipboard` added to `buildInputs` and wrapped onto the
+  clipboard binary's PATH.
+- [x] **3.4** Live stdio smoke on edge: piped write `sid-was-here` +
+  read, got back the exact text round-trip. Full mcp-gateway path
+  pending Keith's rebuild.
 
 ## Phase 4: `journal`
 
