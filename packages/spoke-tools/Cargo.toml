@@ -1,0 +1,24 @@
+[package]
+name = "companion-spoke-tools"
+version = "0.1.0"
+edition = "2021"
+description = "MCP tool servers exposing local-machine capabilities for cairn-companion"
+
+[lib]
+name = "companion_spoke"
+path = "src/lib.rs"
+
+# Each tool is its own binary. mcp-gateway spawns the binary per-call
+# over stdio, so the process is short-lived and has no shared runtime
+# state between tools. Adding a tool = adding a file in src/bin/ and a
+# [[bin]] entry here.
+
+[[bin]]
+name = "companion-mcp-notify"
+path = "src/bin/notify.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "process", "rt"] }
+anyhow = "1"

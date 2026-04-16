@@ -201,6 +201,42 @@ in
       };
     };
 
+    spoke = {
+      enable = lib.mkEnableOption ''
+        cairn-companion spoke tools (Tier 2). Machine-local MCP tool
+        servers — desktop notifications, screenshot, clipboard, journal,
+        apps, Niri control, shell. Each tool is a short-lived stdio MCP
+        server spawned per-call by mcp-gateway. No daemon-core dependency:
+        spoke tools are useful at Tier 0 and above.
+
+        Enabling any tool under `spoke.tools.<tool>.enable` auto-registers
+        that tool with the local mcp-gateway via
+        `services.mcp-gateway.servers.companion-<tool>`. The consuming
+        config is expected to have the mcp-gateway home-manager module
+        imported; without it, those option emissions will fail at
+        evaluation time
+      '';
+
+      package = lib.mkOption {
+        type = lib.types.package;
+        default = self.packages.${pkgs.system}.companion-spoke-tools;
+        defaultText = lib.literalExpression "inputs.cairn-companion.packages.\${pkgs.system}.companion-spoke-tools";
+        description = ''
+          The companion spoke-tools package. Provides one binary per
+          tool under `$out/bin/companion-mcp-<tool>`, each wrapped with
+          its own runtime PATH so the tool's shell-outs resolve
+          regardless of the mcp-gateway unit's inherited PATH.
+        '';
+      };
+
+      tools.notify.enable = lib.mkEnableOption ''
+        the `notify` tool — desktop notifications via notify-send.
+        Picked up by whichever freedesktop-compliant notification
+        daemon is running on the user's Wayland session (mako, DMS,
+        etc.). Fire-and-forget
+      '';
+    };
+
     channels.telegram = {
       enable = lib.mkEnableOption "Telegram channel adapter inside the companion daemon";
 
@@ -588,6 +624,15 @@ in
                 inputs.mcp-gateway.packages.''${pkgs.system}.default;
           '';
         }
+        {
+          assertion = cfg.spoke.enable -> cfg.spoke.package != null;
+          message = ''
+            services.cairn-companion.spoke.enable requires spoke.package to
+            be set to the companion-spoke-tools package. The default
+            resolves to the flake's own build; null it out only if you are
+            providing your own.
+          '';
+        }
       ];
 
       # When the CLI is active it owns the `companion` name on the user's
@@ -676,6 +721,20 @@ in
 
     (lib.mkIf cfg.tui.enable {
       home.packages = [ cfg.tui.package ];
+    })
+
+    # Spoke tools — Tier 2 MCP tool servers.
+    #
+    # Each enabled tool is registered as an mcp-gateway stdio server.
+    # The consumer must have the mcp-gateway home-manager module
+    # imported; otherwise these option emissions fail at eval time
+    # with "unknown option services.mcp-gateway.servers.*", which is
+    # the right error to surface.
+    (lib.mkIf (cfg.spoke.enable && cfg.spoke.tools.notify.enable) {
+      services.mcp-gateway.servers.companion-notify = {
+        enable = true;
+        command = "${cfg.spoke.package}/bin/companion-mcp-notify";
+      };
     })
   ]);
 }
