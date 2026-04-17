@@ -44,6 +44,116 @@ impl CompanionInterface {
             .join(slug)
             .join("memory")
     }
+
+    /// Ensure the Syncthing .stignore file exists in the memory dir.
+    /// Excludes MEMORY.md (regenerated locally) and conflict artifacts.
+    pub fn ensure_stignore(&self) {
+        let dir = self.memory_dir();
+        if !dir.is_dir() {
+            return;
+        }
+        let stignore = dir.join(".stignore");
+        if !stignore.exists() {
+            let content = "// Managed by companion-core — do not edit.\n\
+                           // MEMORY.md is regenerated locally from frontmatter\n\
+                           // to avoid Syncthing conflicts across machines.\n\
+                           MEMORY.md\n\
+                           *.sync-conflict-*\n";
+            if let Err(e) = std::fs::write(&stignore, content) {
+                warn!(%e, "failed to create .stignore");
+            } else {
+                info!("created .stignore in memory dir");
+            }
+        }
+    }
+
+    /// Regenerate MEMORY.md from the frontmatter of all memory files.
+    /// Each file's YAML frontmatter must contain `name` and `description`.
+    /// Produces one index line per file: `- [Name](filename.md) — description`
+    pub fn regenerate_index(&self) {
+        let dir = self.memory_dir();
+        if !dir.is_dir() {
+            return;
+        }
+
+        let mut entries: Vec<(String, String, String)> = Vec::new(); // (name, filename, description)
+
+        let read_dir = match std::fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            Err(e) => {
+                warn!(%e, "failed to read memory dir for index regeneration");
+                return;
+            }
+        };
+
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            let filename = entry.file_name().to_string_lossy().into_owned();
+
+            // Skip non-markdown, the index itself, stignore, and conflict files.
+            if !filename.ends_with(".md")
+                || filename == "MEMORY.md"
+                || filename.contains(".sync-conflict-")
+            {
+                continue;
+            }
+
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Some((name, description)) = parse_frontmatter(&content) {
+                    entries.push((name, filename, description));
+                }
+            }
+        }
+
+        entries.sort_by(|a, b| a.1.cmp(&b.1));
+
+        let mut index = String::new();
+        for (name, filename, description) in &entries {
+            index.push_str(&format!("- [{}]({}) — {}\n", name, filename, description));
+        }
+
+        let index_path = dir.join("MEMORY.md");
+
+        // Only write if content changed — avoid unnecessary mtime bumps
+        // that would trigger more Syncthing churn.
+        let current = std::fs::read_to_string(&index_path).unwrap_or_default();
+        if current != index {
+            if let Err(e) = std::fs::write(&index_path, &index) {
+                warn!(%e, "failed to write MEMORY.md");
+            } else {
+                info!(entries = entries.len(), "regenerated MEMORY.md");
+            }
+        }
+    }
+}
+
+/// Extract `name` and `description` from YAML frontmatter.
+/// Expects `---` delimited block at the start of the file.
+fn parse_frontmatter(content: &str) -> Option<(String, String)> {
+    let content = content.trim_start();
+    if !content.starts_with("---") {
+        return None;
+    }
+    let after_open = &content[3..];
+    let close = after_open.find("---")?;
+    let block = &after_open[..close];
+
+    let mut name = None;
+    let mut description = None;
+
+    for line in block.lines() {
+        let line = line.trim();
+        if let Some(val) = line.strip_prefix("name:") {
+            name = Some(val.trim().to_string());
+        } else if let Some(val) = line.strip_prefix("description:") {
+            description = Some(val.trim().to_string());
+        }
+    }
+
+    match (name, description) {
+        (Some(n), Some(d)) => Some((n, d)),
+        _ => None,
+    }
 }
 
 #[interface(name = "org.cairn.Companion1")]
@@ -373,6 +483,10 @@ pub async fn serve(dispatcher: Arc<Dispatcher>) -> zbus::Result<Connection> {
     let mut broadcast_rx = dispatcher.subscribe();
     let iface = CompanionInterface::new(dispatcher);
 
+    // Seed .stignore and regenerate index before accepting D-Bus calls.
+    iface.ensure_stignore();
+    iface.regenerate_index();
+
     let connection = Connection::session().await?;
 
     connection
@@ -447,4 +561,19 @@ pub async fn serve(dispatcher: Arc<Dispatcher>) -> zbus::Result<Connection> {
 
     info!("D-Bus interface ready on org.cairn.Companion");
     Ok(connection)
+}
+
+/// Spawn a background task that periodically regenerates MEMORY.md
+/// from frontmatter. Catches Syncthing-propagated files that arrive
+/// after startup. Runs every 30 seconds — cheap (stat + maybe one write).
+pub fn spawn_memory_index_task(dispatcher: Arc<Dispatcher>) {
+    let iface = CompanionInterface::new(dispatcher);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            iface.ensure_stignore();
+            iface.regenerate_index();
+        }
+    });
 }

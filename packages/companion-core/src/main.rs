@@ -96,6 +96,9 @@ async fn main() {
         }
     };
 
+    // 5b. Periodic memory index regeneration (catches Syncthing arrivals).
+    dbus::spawn_memory_index_task(dispatcher.clone());
+
     // 6. Start the OpenAI gateway if enabled via environment.
     let shutdown_notify = Arc::new(tokio::sync::Notify::new());
     let gateway_handle = if let Some(config) = gateway::types::GatewayConfig::from_env() {
