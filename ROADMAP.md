@@ -38,10 +38,6 @@ Work proceeds roughly top-to-bottom. Items at the same level can be built in par
 - [x] **[memory-tier](./openspec/changes/archive/memory-tier/)** — Shared persistent memory across machines. Shipped 2026-04-17. Pins daemon-spawned Claude Code to workspace-as-cwd for stable project memory slug. Exposes memory read-only over D-Bus (list, read, index). CLI `companion memory list|show|index`. TUI memory panel (3/m to toggle). NixOS module for Syncthing-based cross-machine sync. Daemon regenerates MEMORY.md from frontmatter locally (`.stignore` prevents sync conflicts on the index). Verified bidirectional propagation between edge and mini — writes, deletes, and index updates all sync cleanly. *Depends on: bootstrap, daemon-core, cli-client, tui-dashboard.*
 - [ ] **[distributed-routing](./openspec/changes/distributed-routing/)** — Hub daemon learns to route tool calls to multiple spokes over Tailscale with active-spoke presence tracking. Deprioritized: shared memory + per-machine mcp-gateway covers the actual fleet use case (edge for hands-on, mini for channel adapters). Revisit if cross-machine tool routing becomes painful. *Depends on: bootstrap, daemon-core, spoke-tools, cli-client*
 
-### Optional polish
-
-- [ ] **[gui-gtk4](./openspec/changes/gui-gtk4/)** — GTK4/libadwaita desktop application for visual dashboards. Explicitly last and optional. *Depends on: bootstrap, daemon-core, cli-client, tui-dashboard*
-
 ### Consumer-side (lives in cairn repo, not this one)
 
 - [ ] **[cairn-integration](./openspec/changes/cairn-integration/)** — Thin cairn-side wiring that imports this flake and exposes cairn-friendly defaults. *Depends on: bootstrap (at minimum). The actual change artifact will live in cairn/openspec/changes/, not here.*
@@ -73,6 +69,4 @@ Every proposal must honor these rules:
 - **Tier 0 alone**: ~200 lines of Nix + shell + two markdown files. Shippable in a single sitting.
 - **Tier 1 complete**: ~3,500 LoC Rust + ~350 lines of Nix. Multiple proposals, weeks of work if pursued sequentially. (Increased from original estimate to account for the `openai-gateway` HTTP server component.)
 - **Tier 2 complete**: +1,500 LoC Rust (mostly tool servers and hub routing) + ~200 lines of Nix.
-- **Optional GUI**: +1,500 LoC Rust for a solid libadwaita app.
-
-Total under 6,000 LoC Rust and ~800 LoC Nix for the entire project — an order of magnitude smaller than comparable agent frameworks, because we delegate everything Claude Code already does.
+Total under 5,000 LoC Rust and ~800 LoC Nix for the entire project — an order of magnitude smaller than comparable agent frameworks, because we delegate everything Claude Code already does.
