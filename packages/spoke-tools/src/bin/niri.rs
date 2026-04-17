@@ -19,7 +19,7 @@
 //! call() once a real use case shows up.
 
 use anyhow::Result;
-use companion_spoke::{err_text, ok_text, serve, tool_def, ToolHandler};
+use companion_spoke::{err_text, ok_text, run, tool_def, ToolHandler};
 use serde_json::{json, Value};
 
 struct Niri;
@@ -213,5 +213,5 @@ fn niri_error_text(output: &std::process::Output) -> String {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    serve(Niri).await
+    run(Niri).await
 }

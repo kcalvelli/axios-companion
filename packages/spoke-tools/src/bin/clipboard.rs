@@ -6,7 +6,7 @@
 //! what I just copied" or "put this on my clipboard."
 
 use anyhow::Result;
-use companion_spoke::{err_text, ok_text, serve, tool_def, ToolHandler};
+use companion_spoke::{err_text, ok_text, run, tool_def, ToolHandler};
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
 
@@ -135,5 +135,5 @@ async fn write(args: &Value) -> Value {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    serve(Clipboard).await
+    run(Clipboard).await
 }

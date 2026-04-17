@@ -229,47 +229,83 @@ in
         '';
       };
 
-      tools.notify.enable = lib.mkEnableOption ''
-        the `notify` tool — desktop notifications via notify-send.
-        Picked up by whichever freedesktop-compliant notification
-        daemon is running on the user's Wayland session (mako, DMS,
-        etc.). Fire-and-forget
-      '';
+      tools.notify = {
+        enable = lib.mkEnableOption ''
+          the `notify` tool — desktop notifications via notify-send.
+          Picked up by whichever freedesktop-compliant notification
+          daemon is running on the user's Wayland session (mako, DMS,
+          etc.). Fire-and-forget
+        '';
+        http = {
+          enable = lib.mkEnableOption "HTTP transport for notify (remote access over Tailscale)";
+          port = lib.mkOption { type = lib.types.port; default = 18792; description = "Listen port for HTTP MCP server"; };
+        };
+      };
 
-      tools.screenshot.enable = lib.mkEnableOption ''
-        the `screenshot` tool — full-display capture via grim.
-        Returns the PNG as MCP ImageContent so multimodal-capable
-        clients can describe or reason about what's on screen. Runs
-        on the mcp-gateway host — captures that host's display
-      '';
+      tools.screenshot = {
+        enable = lib.mkEnableOption ''
+          the `screenshot` tool — full-display capture via grim.
+          Returns the PNG as MCP ImageContent so multimodal-capable
+          clients can describe or reason about what's on screen. Runs
+          on the mcp-gateway host — captures that host's display
+        '';
+        http = {
+          enable = lib.mkEnableOption "HTTP transport for screenshot (remote access over Tailscale)";
+          port = lib.mkOption { type = lib.types.port; default = 18793; description = "Listen port for HTTP MCP server"; };
+        };
+      };
 
-      tools.clipboard.enable = lib.mkEnableOption ''
-        the `clipboard` tool — read and write the Wayland clipboard
-        via wl-paste and wl-copy. Text only for this phase. Runs on
-        the mcp-gateway host — reads/writes that host's clipboard
-      '';
+      tools.clipboard = {
+        enable = lib.mkEnableOption ''
+          the `clipboard` tool — read and write the Wayland clipboard
+          via wl-paste and wl-copy. Text only for this phase. Runs on
+          the mcp-gateway host — reads/writes that host's clipboard
+        '';
+        http = {
+          enable = lib.mkEnableOption "HTTP transport for clipboard (remote access over Tailscale)";
+          port = lib.mkOption { type = lib.types.port; default = 18794; description = "Listen port for HTTP MCP server"; };
+        };
+      };
 
-      tools.journal.enable = lib.mkEnableOption ''
-        the `journal` tool — read lines from the user's systemd
-        journal (journalctl --user), optionally filtered by unit or
-        --since window. Read-only. Runs on the mcp-gateway host —
-        reads that host's user journal
-      '';
+      tools.journal = {
+        enable = lib.mkEnableOption ''
+          the `journal` tool — read lines from the user's systemd
+          journal (journalctl --user), optionally filtered by unit or
+          --since window. Read-only. Runs on the mcp-gateway host —
+          reads that host's user journal
+        '';
+        http = {
+          enable = lib.mkEnableOption "HTTP transport for journal (remote access over Tailscale)";
+          port = lib.mkOption { type = lib.types.port; default = 18791; description = "Listen port for HTTP MCP server"; };
+        };
+      };
 
-      tools.apps.enable = lib.mkEnableOption ''
-        the `apps` tool — open URLs (xdg-open) and launch .desktop
-        entries (dex). Fire-and-forget. Runs on the mcp-gateway
-        host, so the browser / app opens on THAT host's display,
-        not the caller's
-      '';
+      tools.apps = {
+        enable = lib.mkEnableOption ''
+          the `apps` tool — open URLs (xdg-open) and launch .desktop
+          entries (dex). Fire-and-forget. Runs on the mcp-gateway
+          host, so the browser / app opens on THAT host's display,
+          not the caller's
+        '';
+        http = {
+          enable = lib.mkEnableOption "HTTP transport for apps (remote access over Tailscale)";
+          port = lib.mkOption { type = lib.types.port; default = 18795; description = "Listen port for HTTP MCP server"; };
+        };
+      };
 
-      tools.niri.enable = lib.mkEnableOption ''
-        the `niri` tool — control the Niri compositor via `niri msg`.
-        Read tools (niri_windows, niri_workspaces, niri_focused_window)
-        return Niri's native JSON; write tools (niri_focus_window,
-        niri_focus_workspace, niri_close_focused, niri_spawn) perform
-        compositor actions. Runs on the mcp-gateway host
-      '';
+      tools.niri = {
+        enable = lib.mkEnableOption ''
+          the `niri` tool — control the Niri compositor via `niri msg`.
+          Read tools (niri_windows, niri_workspaces, niri_focused_window)
+          return Niri's native JSON; write tools (niri_focus_window,
+          niri_focus_workspace, niri_close_focused, niri_spawn) perform
+          compositor actions. Runs on the mcp-gateway host
+        '';
+        http = {
+          enable = lib.mkEnableOption "HTTP transport for niri (remote access over Tailscale)";
+          port = lib.mkOption { type = lib.types.port; default = 18796; description = "Listen port for HTTP MCP server"; };
+        };
+      };
 
       tools.shell = {
         enable = lib.mkEnableOption ''
@@ -304,6 +340,11 @@ in
             "rg"
             "systemctl"
           ];
+        };
+
+        http = {
+          enable = lib.mkEnableOption "HTTP transport for shell (remote access over Tailscale)";
+          port = lib.mkOption { type = lib.types.port; default = 18790; description = "Listen port for HTTP MCP server"; };
         };
       };
     };
@@ -851,6 +892,126 @@ in
         # module-evaluation time. Empty list → empty env var → deny-all.
         # ["*"] → "*" → allow-all (LOUD).
         env.COMPANION_SHELL_ALLOWLIST = lib.concatStringsSep "," cfg.spoke.tools.shell.allowlist;
+      };
+    })
+
+    # HTTP transport — long-running spoke servers for remote access.
+    #
+    # Each enabled http sub-option generates a systemd user service
+    # running the spoke binary in HTTP mode. Remote gateways connect
+    # to these via `transport = "http"` + `url` in their own
+    # mcp-gateway config. Tailscale is the trust boundary.
+
+    (lib.mkIf (cfg.spoke.enable && cfg.spoke.tools.notify.http.enable) {
+      systemd.user.services."companion-mcp-notify-http" = {
+        Unit.Description = "companion-mcp-notify (HTTP transport)";
+        Service = {
+          ExecStart = "${cfg.spoke.package}/bin/companion-mcp-notify";
+          Environment = [
+            "MCP_TRANSPORT=http"
+            "MCP_HTTP_BIND=0.0.0.0:${toString cfg.spoke.tools.notify.http.port}"
+          ];
+          Restart = "on-failure";
+          RestartSec = 5;
+        };
+        Install.WantedBy = [ "default.target" ];
+      };
+    })
+
+    (lib.mkIf (cfg.spoke.enable && cfg.spoke.tools.screenshot.http.enable) {
+      systemd.user.services."companion-mcp-screenshot-http" = {
+        Unit.Description = "companion-mcp-screenshot (HTTP transport)";
+        Service = {
+          ExecStart = "${cfg.spoke.package}/bin/companion-mcp-screenshot";
+          Environment = [
+            "MCP_TRANSPORT=http"
+            "MCP_HTTP_BIND=0.0.0.0:${toString cfg.spoke.tools.screenshot.http.port}"
+          ];
+          Restart = "on-failure";
+          RestartSec = 5;
+        };
+        Install.WantedBy = [ "default.target" ];
+      };
+    })
+
+    (lib.mkIf (cfg.spoke.enable && cfg.spoke.tools.clipboard.http.enable) {
+      systemd.user.services."companion-mcp-clipboard-http" = {
+        Unit.Description = "companion-mcp-clipboard (HTTP transport)";
+        Service = {
+          ExecStart = "${cfg.spoke.package}/bin/companion-mcp-clipboard";
+          Environment = [
+            "MCP_TRANSPORT=http"
+            "MCP_HTTP_BIND=0.0.0.0:${toString cfg.spoke.tools.clipboard.http.port}"
+          ];
+          Restart = "on-failure";
+          RestartSec = 5;
+        };
+        Install.WantedBy = [ "default.target" ];
+      };
+    })
+
+    (lib.mkIf (cfg.spoke.enable && cfg.spoke.tools.journal.http.enable) {
+      systemd.user.services."companion-mcp-journal-http" = {
+        Unit.Description = "companion-mcp-journal (HTTP transport)";
+        Service = {
+          ExecStart = "${cfg.spoke.package}/bin/companion-mcp-journal";
+          Environment = [
+            "MCP_TRANSPORT=http"
+            "MCP_HTTP_BIND=0.0.0.0:${toString cfg.spoke.tools.journal.http.port}"
+          ];
+          Restart = "on-failure";
+          RestartSec = 5;
+        };
+        Install.WantedBy = [ "default.target" ];
+      };
+    })
+
+    (lib.mkIf (cfg.spoke.enable && cfg.spoke.tools.apps.http.enable) {
+      systemd.user.services."companion-mcp-apps-http" = {
+        Unit.Description = "companion-mcp-apps (HTTP transport)";
+        Service = {
+          ExecStart = "${cfg.spoke.package}/bin/companion-mcp-apps";
+          Environment = [
+            "MCP_TRANSPORT=http"
+            "MCP_HTTP_BIND=0.0.0.0:${toString cfg.spoke.tools.apps.http.port}"
+          ];
+          Restart = "on-failure";
+          RestartSec = 5;
+        };
+        Install.WantedBy = [ "default.target" ];
+      };
+    })
+
+    (lib.mkIf (cfg.spoke.enable && cfg.spoke.tools.niri.http.enable) {
+      systemd.user.services."companion-mcp-niri-http" = {
+        Unit.Description = "companion-mcp-niri (HTTP transport)";
+        Service = {
+          ExecStart = "${cfg.spoke.package}/bin/companion-mcp-niri";
+          Environment = [
+            "MCP_TRANSPORT=http"
+            "MCP_HTTP_BIND=0.0.0.0:${toString cfg.spoke.tools.niri.http.port}"
+          ];
+          Restart = "on-failure";
+          RestartSec = 5;
+        };
+        Install.WantedBy = [ "default.target" ];
+      };
+    })
+
+    (lib.mkIf (cfg.spoke.enable && cfg.spoke.tools.shell.http.enable) {
+      systemd.user.services."companion-mcp-shell-http" = {
+        Unit.Description = "companion-mcp-shell (HTTP transport)";
+        Service = {
+          ExecStart = "${cfg.spoke.package}/bin/companion-mcp-shell";
+          Environment = [
+            "MCP_TRANSPORT=http"
+            "MCP_HTTP_BIND=0.0.0.0:${toString cfg.spoke.tools.shell.http.port}"
+            "COMPANION_SHELL_ALLOWLIST=${lib.concatStringsSep "," cfg.spoke.tools.shell.allowlist}"
+          ];
+          Restart = "on-failure";
+          RestartSec = 5;
+        };
+        Install.WantedBy = [ "default.target" ];
       };
     })
   ]);

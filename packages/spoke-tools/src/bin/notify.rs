@@ -5,7 +5,7 @@
 //! it up — cairn-companion does not care which.
 
 use anyhow::Result;
-use companion_spoke::{err_text, ok_text, serve, tool_def, ToolHandler};
+use companion_spoke::{err_text, ok_text, run, tool_def, ToolHandler};
 use serde_json::{json, Value};
 
 struct Notify;
@@ -93,5 +93,5 @@ impl ToolHandler for Notify {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    serve(Notify).await
+    run(Notify).await
 }

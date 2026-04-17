@@ -17,7 +17,7 @@
 
 use anyhow::Result;
 use base64::Engine;
-use companion_spoke::{err_text, ok_image, serve, tool_def, ToolHandler};
+use companion_spoke::{err_text, ok_image, run, tool_def, ToolHandler};
 use serde_json::{json, Value};
 
 struct Screenshot;
@@ -73,5 +73,5 @@ impl ToolHandler for Screenshot {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    serve(Screenshot).await
+    run(Screenshot).await
 }

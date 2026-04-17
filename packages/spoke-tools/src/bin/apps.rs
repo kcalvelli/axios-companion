@@ -21,7 +21,7 @@
 //! same lesson as wl-copy in the clipboard tool.
 
 use anyhow::Result;
-use companion_spoke::{err_text, ok_text, serve, tool_def, ToolHandler};
+use companion_spoke::{err_text, ok_text, run, tool_def, ToolHandler};
 use serde_json::{json, Value};
 
 struct Apps;
@@ -266,5 +266,5 @@ fn resolve_username(home: &str) -> String {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    serve(Apps).await
+    run(Apps).await
 }

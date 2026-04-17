@@ -33,7 +33,7 @@
 //! modules/home-manager/default.nix.
 
 use anyhow::Result;
-use companion_spoke::{err_text, ok_text, serve, tool_def, ToolHandler};
+use companion_spoke::{err_text, ok_text, run as serve, tool_def, ToolHandler};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::Path;

@@ -10,7 +10,7 @@
 //! central-gateway caveat as every other spoke tool at this tier.
 
 use anyhow::Result;
-use companion_spoke::{err_text, ok_text, serve, tool_def, ToolHandler};
+use companion_spoke::{err_text, ok_text, run, tool_def, ToolHandler};
 use serde_json::{json, Value};
 
 const DEFAULT_LINES: u32 = 100;
@@ -174,5 +174,5 @@ async fn list_units() -> Value {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    serve(Journal).await
+    run(Journal).await
 }
