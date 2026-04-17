@@ -160,13 +160,17 @@ async fn chat_completions(
     // Until per-key auth lands on the gateway, every gateway turn must
     // run with Anonymous trust so the deny list strips Bash/Edit/MCP/etc.
     // Do NOT upgrade this to Owner without solving auth first.
-    let requested_model = req.model.clone();
+    // Ignore the model name from the OpenAI request. The companion
+    // wrapper uses whatever Claude Code defaults to. Passing the
+    // client's model name breaks when Anthropic retires model IDs
+    // (e.g. claude-opus-4-6 → 4-7) and the voice pipeline hasn't
+    // been updated yet.
     let turn_req = TurnRequest {
         surface_id: "openai".into(),
         conversation_id,
         message_text,
         trust: TrustLevel::Anonymous,
-        model: requested_model,
+        model: None,
     };
 
     let created = state.start_time;
